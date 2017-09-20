@@ -1,38 +1,72 @@
-try:
-    from Crypto.Hash import keccak
-    sha3_256 = lambda x: keccak.new(digest_bits=256, data=x).digest()
-except ImportError:
-    import sha3
-#    sha3_256 = lambda x: sha3._sha3.sha3_256(x).digest()
-    def sha3_256(x):
-        digester = sha3.sha3_256()
-        digester.update(x)
-        return digester.digest()
+import ast
 
-import ast, tokenize, binascii
-from io import BytesIO
-from .opcodes import opcodes, pseudo_opcodes
-import copy
-from .types import NodeType, BaseType, ListType, MappingType, StructType, \
-    MixedType, NullType, ByteArrayType, TupleType
-from .types import base_types, parse_type, canonicalize_type, is_base_type, \
-    is_numeric_type, get_size_of_type, is_varname_valid
-from .types import combine_units, are_units_compatible, set_default_units
-from .exceptions import InvalidTypeException, TypeMismatchException, \
-    VariableDeclarationException, StructureException, ConstancyViolationException, \
-    InvalidTypeException, InvalidLiteralException, NonPayableViolationException
-from .functions import dispatch_table, stmt_dispatch_table
-from .parser_utils import LLLnode, make_byte_array_copier, get_number_as_fraction, \
-    get_original_if_0x_prefixed, get_length, getpos
-from .utils import fourbytes_to_int, hex_to_int, bytes_to_int, checksum_encode, \
-    DECIMAL_DIVISOR, RESERVED_MEMORY, ADDRSIZE_POS, MAXNUM_POS, MINNUM_POS, \
-    MAXDECIMAL_POS, MINDECIMAL_POS, FREE_VAR_SPACE, BLANK_SPACE, FREE_LOOP_INDEX, \
-    calc_mem_gas
+from .exceptions import (
+    ConstancyViolationException,
+    InvalidLiteralException,
+    NonPayableViolationException,
+    StructureException,
+    TypeMismatchException,
+    VariableDeclarationException,
+)
+from .function_signature import (
+    FunctionSignature,
+    VariableRecord,
+)
+from .functions import (
+    dispatch_table,
+    stmt_dispatch_table,
+)
+from .parser_utils import LLLnode
+from .parser_utils import (
+    get_length,
+    get_number_as_fraction,
+    get_original_if_0x_prefixed,
+    getpos,
+    make_byte_array_copier,
+)
+from .types import (
+    BaseType,
+    ByteArrayType,
+    ListType,
+    MappingType,
+    MixedType,
+    NullType,
+    StructType,
+    TupleType,
+)
+from .types import (
+    get_size_of_type,
+    is_base_type,
+    is_numeric_type,
+    parse_type,
+)
+from .types import (
+    are_units_compatible,
+    combine_units,
+    set_default_units,
+)
+from .utils import (
+    DECIMAL_DIVISOR,
+    RESERVED_MEMORY,
+    ADDRSIZE_POS,
+    MAXNUM_POS,
+    MINNUM_POS,
+    MAXDECIMAL_POS,
+    MINDECIMAL_POS,
+)
+from .utils import (
+    bytes_to_int,
+    checksum_encode,
+    calc_mem_gas,
+    is_varname_valid,
+)
+
 
 try:
     x = ast.AnnAssign
 except:
     raise Exception("Requires python 3.6 or higher for annotation support")
+
 
 # Converts code to parse tree
 def parse(code):
@@ -40,11 +74,13 @@ def parse(code):
     decorate_ast_with_source(o, code)
     return o.body
 
+
 # Parser for a single line
 def parse_line(code):
     o = ast.parse(code).body[0]
     decorate_ast_with_source(o, code)
     return o
+
 
 # Decorate every node of an AST tree with the original source code.
 # This is necessary to facilitate error pretty-printing.
@@ -57,13 +93,14 @@ def decorate_ast_with_source(_ast, code):
 
     MyVisitor().visit(_ast)
 
+
 # Make a getter for a variable. This function gives an output that
 # contains lists of 4-tuples:
 # (i) the tail of the function name for the getter
 # (ii) the code for the arguments that the function takes
 # (iii) the code for the return
 # (iv) the output type
-# 
+#
 # Here is an example:
 #
 # Input: my_variable: {foo: num, bar: decimal[5]}
@@ -72,7 +109,7 @@ def decorate_ast_with_source(_ast, code):
 #
 # [('__foo', '', '.foo', 'num'),
 #  ('__bar', 'arg0: num, ', '.bar[arg0]', 'decimal')]
-# 
+#
 # The getters will have code:
 # def get_my_variable__foo() -> num: return self.foo
 # def get_my_variable__bar(arg0: nun) -> decimal: return self.bar[arg0]
@@ -89,14 +126,14 @@ def _mk_getter_helper(typ, depth=0):
     # the index in the list, add an item access to the return statement
     elif isinstance(typ, ListType):
         o = []
-        for funname, head, tail, base in _mk_getter_helper(typ.subtype, depth+1):
+        for funname, head, tail, base in _mk_getter_helper(typ.subtype, depth + 1):
             o.append((funname, ("arg%d: num, " % depth) + head, ("[arg%d]" % depth) + tail, base))
         return o
     # Mapping type: do not extend the getter name, add an input argument for
     # the key in the map, add a value access to the return statement
     elif isinstance(typ, MappingType):
         o = []
-        for funname, head, tail, base in _mk_getter_helper(typ.valuetype, depth+1):
+        for funname, head, tail, base in _mk_getter_helper(typ.valuetype, depth + 1):
             o.append((funname, ("arg%d: %r, " % (depth, typ.keytype)) + head, ("[arg%d]" % depth) + tail, base))
         return o
     # Struct type: for each member variable, make a separate getter, extend
@@ -106,16 +143,18 @@ def _mk_getter_helper(typ, depth=0):
         o = []
         for k, v in typ.members.items():
             for funname, head, tail, base in _mk_getter_helper(v, depth):
-                o.append(("__"+k+funname, head, "."+k+tail, base))
+                o.append(("__" + k + funname, head, "." + k + tail, base))
         return o
     else:
         raise Exception("Unexpected type")
+
 
 # Make a list of getters for a given variable name with a given type
 def mk_getter(varname, typ):
     funs = _mk_getter_helper(typ)
     return ['@constant\ndef get_%s%s(%s) -> %s: return self.%s%s' % (varname, funname, head.rstrip(', '), base, varname, tail)
             for (funname, head, tail, base) in funs]
+
 
 # Parse top-level functions and variables
 def get_defs_and_globals(code):
@@ -138,19 +177,20 @@ def get_defs_and_globals(code):
                 if len(item.annotation.args) != 1:
                     raise StructureException("Public expects one arg (the type)")
                 typ = parse_type(item.annotation.args[0], 'storage')
-                _globals[item.target.id] = (len(_globals), typ)
+                _globals[item.target.id] = VariableRecord(item.target.id, len(_globals), typ, True)
                 # Adding getters here
                 for getter in mk_getter(item.target.id, typ):
                     _getters.append(parse_line('\n' * (item.lineno - 1) + getter))
                     _getters[-1].pos = getpos(item)
             else:
-                _globals[item.target.id] = (len(_globals), parse_type(item.annotation, 'storage'))
+                _globals[item.target.id] = VariableRecord(item.target.id, len(_globals), parse_type(item.annotation, 'storage'), True)
         # Function definitions
         elif isinstance(item, ast.FunctionDef):
             _defs.append(item)
         else:
             raise StructureException("Invalid top-level statement", item)
     return _defs + _getters, _globals
+
 
 # Header code
 initializer_lll = LLLnode.from_list(['seq',
@@ -162,67 +202,6 @@ initializer_lll = LLLnode.from_list(['seq',
                                         ['mstore', MINDECIMAL_POS, (-2**128 + 1) * DECIMAL_DIVISOR],
                                     ], typ=None)
 
-# Get function details
-# Returns:
-# (i) function name
-# (ii) function arguments, as a list of triples:
-#     argname, location in calldata, type
-# (iii) output type
-# (iv) boolean: is this a constant function?
-# (v) signature (for ABI purposes)
-# (vi) 4-byte ID generated from signature
-def get_func_details(code):
-    name = code.name
-    pos = 0 
-    # Determine the arguments, expects something of the form def foo(arg1: num, arg2: num ...
-    args = []
-    for arg in code.args.args:
-        typ = arg.annotation
-        if not isinstance(arg.arg, str):
-            raise VariableDeclarationException("Argument name invalid", arg)
-        if not typ:
-            raise InvalidTypeException("Argument must have type", arg)
-        if not is_varname_valid(arg.arg):
-            raise VariableDeclarationException("Argument name invalid or reserved: "+arg.arg, arg)
-        if arg.arg in (x[0] for x in args):
-            raise VariableDeclarationException("Duplicate function argument name: "+arg.arg, arg)
-        parsed_type = parse_type(typ, None)
-        args.append((arg.arg, pos, parsed_type))
-        if isinstance(parsed_type, ByteArrayType):
-            pos += 32
-        else:
-            pos += get_size_of_type(parsed_type) * 32
-    # Apply decorators
-    const, payable, internal = False, False, False
-    for dec in code.decorator_list:
-        if isinstance(dec, ast.Name) and dec.id == "constant":
-            const = True
-        elif isinstance(dec, ast.Name) and dec.id == "payable":
-            payable = True
-        elif isinstance(dec, ast.Name) and dec.id == "internal":
-            internal = True
-        else:
-            raise StructureException("Bad decorator", dec)
-    # Determine the return type and whether or not it's constant. Expects something
-    # of the form:
-    # def foo(): ...
-    # def foo() -> num: ... 
-    # If there is no return type, ie. it's of the form def foo(): ...
-    # and NOT def foo() -> type: ..., then it's null
-    if not code.returns:
-        output_type = None
-    elif isinstance(code.returns, (ast.Name, ast.Compare, ast.Subscript, ast.Call)):
-        output_type = parse_type(code.returns, None)
-    else:
-        raise InvalidTypeException("Output type invalid or unsupported: %r" % parse_type(code.returns, None), code.returns)
-    # Output type must be canonicalizable
-    if output_type is not None:
-        assert canonicalize_type(output_type)
-    # Get the canonical function signature
-    sig = name + '(' + ','.join([canonicalize_type(parse_type(arg.annotation, None)) for arg in code.args.args]) + ')'
-    # Take the first 4 bytes of the hash of the sig to get the method ID
-    method_id = fourbytes_to_int(sha3_256(bytes(sig, 'utf-8'))[:4])
-    return name, args, output_type, (const, payable, internal), sig, method_id
 
 # Contains arguments, variables, etc
 class Context():
@@ -250,17 +229,17 @@ class Context():
     # Add a new variable
     def new_variable(self, name, typ):
         if not is_varname_valid(name):
-            raise VariableDeclarationException("Variable name invalid or reserved: "+name)
+            raise VariableDeclarationException("Variable name invalid or reserved: " + name)
         if name in self.vars or name in self.globals:
             raise VariableDeclarationException("Duplicate variable name: %s" % name)
-        self.vars[name] = self.next_mem, typ, True
+        self.vars[name] = VariableRecord(name, self.next_mem, typ, True)
         pos = self.next_mem
         self.next_mem += 32 * get_size_of_type(typ)
         return pos
 
     # Add an anonymous variable (used in some complex function definitions)
     def new_placeholder(self, typ):
-        name = '_placeholder_'+str(self.placeholder_count)
+        name = '_placeholder_' + str(self.placeholder_count)
         self.placeholder_count += 1
         return self.new_variable(name, typ)
 
@@ -268,32 +247,23 @@ class Context():
     def get_next_mem(self):
         return self.next_mem
 
+
 # Is a function the initializer?
 def is_initializer(code):
     return code.name == '__init__'
+
 
 # Get ABI signature
 def mk_full_signature(code):
     o = []
     _defs, _globals = get_defs_and_globals(code)
     for code in _defs:
-        name, args, output_type, (const, payable, internal), sig, method_id = get_func_details(code)
-        if not internal:
-            o.append({
-                "name": sig,
-                "outputs": [{"type": canonicalize_type(output_type), "name": "out"}] if output_type else [],
-                "inputs": [{"type": canonicalize_type(typ), "name": nam} for nam, loc, typ in args],
-                "constant": const,
-                "payable": payable,
-                "type": "constructor" if name == "__init__" else "function"
-            })
+        sig = FunctionSignature.from_definition(code)
+        if not sig.internal:
+            o.append(sig.to_abi_dict())
     return o
 
-# Get a signature of a single function
-def get_function_signature(code):
-    name, args, output_type, flags, sig, method_id = get_func_details(code)
-    return (name, [typ for nam, loc, typ in args], output_type, method_id, flags)
-        
+
 # Main python parse tree => LLL method
 def parse_tree_to_lll(code, origcode):
     _defs, _globals = get_defs_and_globals(code)
@@ -319,10 +289,12 @@ def parse_tree_to_lll(code, origcode):
             sub.append(parse_func(_def, _globals, {'self': sigs}, origcode))
             sub[-1].total_gas += add_gas
             add_gas += 30
-            name, ins, outs, sig, flags = get_function_signature(_def)
-            sigs[name] = (ins, outs, sig, sub[-1].total_gas, flags)
+            sig = FunctionSignature.from_definition(_def)
+            sig.gas = sub[-1].total_gas
+            sigs[sig.name] = sig
         o.append(['return', 0, ['lll', sub, 0]])
     return LLLnode.from_list(o, typ=None)
+
 
 # Checks that an input matches its type
 def make_clamper(datapos, mempos, typ, is_init=False):
@@ -359,54 +331,59 @@ def make_clamper(datapos, mempos, typ, is_init=False):
     else:
         return LLLnode.from_list('pass')
 
+
 # Parses a function declaration
-def parse_func(code, _globals, sigs, origcode, _vars={}):
-    name, args, output_type, (const, payable, internal), sig, method_id = get_func_details(code)
+def parse_func(code, _globals, sigs, origcode, _vars=None):
+    if _vars is None:
+        _vars = {}
+
+    sig = FunctionSignature.from_definition(code)
     # Check for duplicate variables with globals
-    for arg in args:
-        if arg[0] in _globals:
-            raise VariableDeclarationException("Variable name duplicated between function arguments and globals: "+arg[0])
+    for arg in sig.args:
+        if arg.name in _globals:
+            raise VariableDeclarationException("Variable name duplicated between function arguments and globals: " + arg.name)
     # Create a context
     context = Context(vars=_vars, globals=_globals, sigs=sigs,
-                      return_type=output_type, is_constant=const, is_payable=payable, origcode=origcode)
+                      return_type=sig.output_type, is_constant=sig.const, is_payable=sig.payable, origcode=origcode)
     # Copy calldata to memory for fixed-size arguments
-    copy_size = sum([32 if isinstance(typ, ByteArrayType) else get_size_of_type(typ) * 32 for _, _, typ in args])
+    copy_size = sum([32 if isinstance(arg.typ, ByteArrayType) else get_size_of_type(arg.typ) * 32 for arg in sig.args])
     context.next_mem += copy_size
-    if not len(args):
+    if not len(sig.args):
         copier = 'pass'
-    elif name == '__init__':
+    elif sig.name == '__init__':
         copier = ['codecopy', RESERVED_MEMORY, '~codelen', copy_size]
     else:
         copier = ['calldatacopy', RESERVED_MEMORY, 4, copy_size]
     clampers = [copier]
     # Add asserts for payable and internal
-    if not payable:
+    if not sig.payable:
         clampers.append(['assert', ['iszero', 'callvalue']])
-    if internal:
+    if sig.internal:
         clampers.append(['assert', ['eq', 'caller', 'address']])
     # Fill in variable positions
-    for arg, pos, typ in args:
-        clampers.append(make_clamper(pos, context.next_mem, typ, name == '__init__'))
-        if isinstance(typ, ByteArrayType):
-            context.vars[arg] = context.next_mem, typ, False
-            context.next_mem += 32 * get_size_of_type(typ)
+    for arg in sig.args:
+        clampers.append(make_clamper(arg.pos, context.next_mem, arg.typ, sig.name == '__init__'))
+        if isinstance(arg.typ, ByteArrayType):
+            context.vars[arg.name] = VariableRecord(arg.name, context.next_mem, arg.typ, False)
+            context.next_mem += 32 * get_size_of_type(arg.typ)
         else:
-            context.vars[arg] = RESERVED_MEMORY + pos, typ, False
+            context.vars[arg.name] = VariableRecord(arg.name, RESERVED_MEMORY + arg.pos, arg.typ, False)
     # Create "clampers" (input well-formedness checkers)
     # Return function body
-    if name == '__init__':
+    if sig.name == '__init__':
         o = LLLnode.from_list(['seq'] + clampers + [parse_body(code.body, context)], pos=getpos(code))
     else:
-        method_id_node = LLLnode.from_list(method_id, pos=getpos(code), annotation='%s' % name)
+        method_id_node = LLLnode.from_list(sig.method_id, pos=getpos(code), annotation='%s' % sig.name)
         o = LLLnode.from_list(['if',
                                   ['eq', ['mload', 0], method_id_node],
                                   ['seq'] + clampers + [parse_body(c, context) for c in code.body] + ['stop']
                                ], typ=None, pos=getpos(code))
     o.context = context
     o.total_gas = o.gas + calc_mem_gas(o.context.next_mem)
-    o.func_name = name
+    o.func_name = sig.name
     return o
-    
+
+
 # Parse a piece of code
 def parse_body(code, context):
     if not isinstance(code, list):
@@ -416,7 +393,8 @@ def parse_body(code, context):
         o.append(parse_stmt(stmt, context))
     return LLLnode.from_list(['seq'] + o, pos=getpos(code[0]) if code else None)
 
-# Take a value representing a storage location, and descend down to an element or member variable
+
+# Take a value representing a memory or storage location, and descend down to an element or member variable
 def add_variable_offset(parent, key):
     typ, location = parent.typ, parent.location
     if isinstance(typ, (StructType, TupleType)):
@@ -427,9 +405,9 @@ def add_variable_offset(parent, key):
                 raise TypeMismatchException("Object does not have member variable %s" % key)
             subtype = typ.members[key]
             attrs = sorted(typ.members.keys())
-    
+
             if key not in attrs:
-                raise TypeMismatchException("Member %s not found. Only the following available: %s" % (expr.attr, " ".join(attrs)))
+                raise TypeMismatchException("Member %s not found. Only the following available: %s" % (key, " ".join(attrs)))
             index = attrs.index(key)
             annotation = key
         else:
@@ -442,7 +420,6 @@ def add_variable_offset(parent, key):
             return LLLnode.from_list(['add', ['sha3_32', parent], LLLnode.from_list(index, annotation=annotation)],
                                      typ=subtype,
                                      location='storage')
-
         elif location == 'storage_prehashed':
             return LLLnode.from_list(['add', parent, LLLnode.from_list(index, annotation=annotation)],
                                      typ=subtype,
@@ -465,11 +442,11 @@ def add_variable_offset(parent, key):
             subtype = typ.valuetype
             sub = base_type_conversion(key, key.typ, typ.keytype)
         if location == 'storage':
-           return LLLnode.from_list(['add', ['sha3_32', parent], sub],
+            return LLLnode.from_list(['add', ['sha3_32', parent], sub],
                                      typ=subtype,
                                      location='storage')
         elif location == 'storage_prehashed':
-           return LLLnode.from_list(['add', parent, sub],
+            return LLLnode.from_list(['add', parent, sub],
                                      typ=subtype,
                                      location='storage')
         elif location == 'memory':
@@ -480,9 +457,10 @@ def add_variable_offset(parent, key):
                                       typ=subtype,
                                       location='memory')
         else:
-            raise TypeMismatchException("Not expecting an array access")
+            raise TypeMismatchException("Not expecting an array access ")
     else:
         raise TypeMismatchException("Cannot access the child of a constant variable! %r" % typ)
+
 
 # Parse an expression
 def parse_expr(expr, context):
@@ -493,19 +471,19 @@ def parse_expr(expr, context):
         orignum = get_original_if_0x_prefixed(expr, context)
         if orignum is None and isinstance(expr.n, int):
             if not (-2**127 + 1 <= expr.n <= 2**127 - 1):
-                raise InvalidLiteralException("Number out of range: "+str(expr.n), expr)
+                raise InvalidLiteralException("Number out of range: " + str(expr.n), expr)
             return LLLnode.from_list(expr.n, typ=BaseType('num', None), pos=getpos(expr))
         elif isinstance(expr.n, float):
             numstring, num, den = get_number_as_fraction(expr, context)
             if not (-2**127 * den < num < 2**127 * den):
-                raise InvalidLiteralException("Number out of range: "+numstring, expr)
+                raise InvalidLiteralException("Number out of range: " + numstring, expr)
             if DECIMAL_DIVISOR % den:
-                raise InvalidLiteralException("Too many decimal places: "+numstring, expr)
+                raise InvalidLiteralException("Too many decimal places: " + numstring, expr)
             return LLLnode.from_list(num * DECIMAL_DIVISOR // den, typ=BaseType('decimal', None), pos=getpos(expr))
         elif len(orignum) == 42:
             if checksum_encode(orignum) != orignum:
                 raise InvalidLiteralException("Address checksum mismatch. If you are sure this is the "
-                                              "right address, the correct checksummed form is: "+
+                                              "right address, the correct checksummed form is: " +
                                               checksum_encode(orignum), expr)
             return LLLnode.from_list(expr.n, typ=BaseType('address'), pos=getpos(expr))
         elif len(orignum) == 66:
@@ -528,11 +506,11 @@ def parse_expr(expr, context):
         return LLLnode.from_list(['seq'] + seq + [placeholder], typ=ByteArrayType(len(bytez)), location='memory', pos=getpos(expr))
     # True, False, None constants
     elif isinstance(expr, ast.NameConstant):
-        if expr.value == True:
+        if expr.value is True:
             return LLLnode.from_list(1, typ='bool', pos=getpos(expr))
-        elif expr.value == False:
+        elif expr.value is False:
             return LLLnode.from_list(0, typ='bool', pos=getpos(expr))
-        elif expr.value == None:
+        elif expr.value is None:
             return LLLnode.from_list(None, typ=NullType(), pos=getpos(expr))
         else:
             raise Exception("Unknown name constant: %r" % expr.value.value)
@@ -547,10 +525,10 @@ def parse_expr(expr, context):
         if expr.id == 'null':
             return LLLnode.from_list(None, typ=NullType(), pos=getpos(expr))
         if expr.id in context.vars:
-            dataloc, typ, mutable = context.vars[expr.id]
-            return LLLnode.from_list(dataloc, typ=typ, location='memory', pos=getpos(expr), annotation=expr.id, mutable=mutable)
+            var = context.vars[expr.id]
+            return LLLnode.from_list(var.pos, typ=var.typ, location='memory', pos=getpos(expr), annotation=expr.id, mutable=var.mutable)
         else:
-            raise VariableDeclarationException("Undeclared variable: "+expr.id, expr)
+            raise VariableDeclarationException("Undeclared variable: " + expr.id, expr)
     # x.y or x[5]
     elif isinstance(expr, ast.Attribute):
         # x.balance: balance of address x
@@ -568,9 +546,9 @@ def parse_expr(expr, context):
         # self.x: global attribute
         elif isinstance(expr.value, ast.Name) and expr.value.id == "self":
             if expr.attr not in context.globals:
-                raise VariableDeclarationException("Persistent variable undeclared: "+expr.attr, expr)
-            pos, typ = context.globals[expr.attr][0],context.globals[expr.attr][1]
-            return LLLnode.from_list(pos, typ=typ, location='storage', pos=getpos(expr), annotation='self.' + expr.attr)
+                raise VariableDeclarationException("Persistent variable undeclared: " + expr.attr, expr)
+            var = context.globals[expr.attr]
+            return LLLnode.from_list(var.pos, typ=var.typ, location='storage', pos=getpos(expr), annotation='self.' + expr.attr)
         # Reserved keywords
         elif isinstance(expr.value, ast.Name) and expr.value.id in ("msg", "block", "tx"):
             key = expr.value.id + "." + expr.attr
@@ -593,7 +571,7 @@ def parse_expr(expr, context):
             elif key == "tx.origin":
                 return LLLnode.from_list(['origin'], typ='address', pos=getpos(expr))
             else:
-                raise Exception("Unsupported keyword: "+key)
+                raise Exception("Unsupported keyword: " + key)
         # Other variables
         else:
             sub = parse_variable_location(expr.value, context)
@@ -631,7 +609,7 @@ def parse_expr(expr, context):
             if left.typ.positional and right.typ.positional and isinstance(expr.op, ast.Add):
                 raise TypeMismatchException("Cannot add two positional units!", expr)
             new_unit = left.typ.unit or right.typ.unit
-            new_positional = left.typ.positional ^ right.typ.positional # xor, as subtracting two positionals gives a delta
+            new_positional = left.typ.positional ^ right.typ.positional  # xor, as subtracting two positionals gives a delta
             op = 'add' if isinstance(expr.op, ast.Add) else 'sub'
             if ltyp == rtyp:
                 o = LLLnode.from_list([op, left, right], typ=BaseType(ltyp, new_unit, new_positional), pos=getpos(expr))
@@ -690,6 +668,12 @@ def parse_expr(expr, context):
                                       typ=BaseType('decimal', new_unit), pos=getpos(expr))
         else:
             raise Exception("Unsupported binop: %r" % expr.op)
+        if o.typ.typ == 'num':
+            return LLLnode.from_list(['clamp', ['mload', MINNUM_POS], o, ['mload', MAXNUM_POS]], typ=o.typ, pos=getpos(expr))
+        elif o.typ.typ == 'decimal':
+            return LLLnode.from_list(['clamp', ['mload', MINDECIMAL_POS], o, ['mload', MAXDECIMAL_POS]], typ=o.typ, pos=getpos(expr))
+        else:
+            raise Exception("%r %r" % (o, o.typ))
     # Comparison operations
     elif isinstance(expr, ast.Compare):
         left = parse_value_expr(expr.left, context)
@@ -717,11 +701,11 @@ def parse_expr(expr, context):
                 raise TypeMismatchException("Invalid type for comparison op", expr)
         ltyp, rtyp = left.typ.typ, right.typ.typ
         if ltyp == rtyp:
-            o = LLLnode.from_list([op, left, right], typ='bool', pos=getpos(expr))
+            return LLLnode.from_list([op, left, right], typ='bool', pos=getpos(expr))
         elif ltyp == 'decimal' and rtyp == 'num':
-            o = LLLnode.from_list([op, left, ['mul', right, DECIMAL_DIVISOR]], typ='bool', pos=getpos(expr))
+            return LLLnode.from_list([op, left, ['mul', right, DECIMAL_DIVISOR]], typ='bool', pos=getpos(expr))
         elif ltyp == 'num' and rtyp == 'decimal':
-            o = LLLnode.from_list([op, ['mul', left, DECIMAL_DIVISOR], right], typ='bool', pos=getpos(expr))
+            return LLLnode.from_list([op, ['mul', left, DECIMAL_DIVISOR], right], typ='bool', pos=getpos(expr))
         else:
             raise TypeMismatchException("Unsupported types for comparison: %r %r" % (ltyp, rtyp), expr)
     # Boolean logical operations
@@ -737,19 +721,19 @@ def parse_expr(expr, context):
         elif isinstance(expr.op, ast.Or):
             op = 'or'
         else:
-            raise Exception("Unsupported bool op: "+expr.op)
-        o = LLLnode.from_list([op, left, right], typ='bool', pos=getpos(expr))
+            raise Exception("Unsupported bool op: " + expr.op)
+        return LLLnode.from_list([op, left, right], typ='bool', pos=getpos(expr))
     # Unary operations (only "not" supported)
     elif isinstance(expr, ast.UnaryOp):
         operand = parse_value_expr(expr.operand, context)
         if isinstance(expr.op, ast.Not):
             # Note that in the case of bool, num, address, decimal, num256 AND bytes32,
             # a zero entry represents false, all others represent true
-            o = LLLnode.from_list(["iszero", operand], typ='bool', pos=getpos(expr))
+            return LLLnode.from_list(["iszero", operand], typ='bool', pos=getpos(expr))
         elif isinstance(expr.op, ast.USub):
             if not is_numeric_type(operand.typ):
                 raise TypeMismatchException("Unsupported type for negation: %r" % operand.typ, operand)
-            o = LLLnode.from_list(["sub", 0, operand], typ=operand.typ, pos=getpos(expr))
+            return LLLnode.from_list(["sub", 0, operand], typ=operand.typ, pos=getpos(expr))
         else:
             raise StructureException("Only the 'not' unary operator is supported")
     # Function calls
@@ -757,21 +741,24 @@ def parse_expr(expr, context):
         if isinstance(expr.func, ast.Name) and expr.func.id in dispatch_table:
             return dispatch_table[expr.func.id](expr, context)
         elif isinstance(expr.func, ast.Attribute) and isinstance(expr.func.value, ast.Name) and expr.func.value.id == "self":
-            ins, out, sig, maxgas, (const, payable, internal) = context.sigs['self'][expr.func.attr]
-            inargs, inargsize = pack_arguments(context, 'self', expr.func.attr, [parse_expr(arg, context) for arg in expr.args])
-            output_placeholder = context.new_placeholder(typ=out)
-            if isinstance(out, BaseType):
+            if expr.func.attr not in context.sigs['self']:
+                raise VariableDeclarationException("Function not declared yet (reminder: functions cannot "
+                                                   "call functions later in code than themselves): %s" % expr.func.attr)
+            sig = context.sigs['self'][expr.func.attr]
+            inargs, inargsize = pack_arguments(sig, [parse_expr(arg, context) for arg in expr.args], context)
+            output_placeholder = context.new_placeholder(typ=sig.output_type)
+            if isinstance(sig.output_type, BaseType):
                 returner = output_placeholder
-            elif isinstance(out, ByteArrayType):
+            elif isinstance(sig.output_type, ByteArrayType):
                 returner = output_placeholder + 32
             else:
-                raise TypeMismatchException("Invalid output type: %r" % out, expr)
+                raise TypeMismatchException("Invalid output type: %r" % sig.output_type, expr)
             o = LLLnode.from_list(['seq',
                                         ['assert', ['call', ['gas'], ['address'], 0,
                                                         inargs, inargsize,
-                                                        output_placeholder, get_size_of_type(out) * 32]],
-                                        returner], typ=out, location='memory', pos=getpos(expr))
-            o.gas += maxgas
+                                                        output_placeholder, get_size_of_type(sig.output_type) * 32]],
+                                        returner], typ=sig.output_type, location='memory', pos=getpos(expr))
+            o.gas += sig.gas
             return o
         else:
             raise StructureException("Unsupported operator: %r" % ast.dump(expr), expr)
@@ -796,21 +783,12 @@ def parse_expr(expr, context):
             if not isinstance(key, ast.Name) or not is_varname_valid(key.id):
                 raise TypeMismatchException("Invalid member variable for struct: %r" % vars(key).get('id', key), key)
             if key.id in o:
-                raise TypeMismatchException("Member variable duplicated: "+key.id, key)
+                raise TypeMismatchException("Member variable duplicated: " + key.id, key)
             o[key.id] = parse_expr(value, context)
             members[key.id] = o[key.id].typ
         return LLLnode.from_list(["multi"] + [o[key] for key in sorted(list(o.keys()))], typ=StructType(members), pos=getpos(expr))
-    else:
-        raise Exception("Unsupported operator: %r" % ast.dump(expr))
-    # Clamp based on variable type
-    if o.location is None and o.typ == 'bool':
-        return o
-    elif o.location is None and o.typ == 'num':
-        return LLLnode.from_list(['clamp', ['mload', MINNUM_POS], o, ['mload', MAXNUM_POS]], typ='num', pos=getpos(expr))
-    elif o.location is None and o.typ == 'decimal':
-        return LLLnode.from_list(['clamp', ['mload', MINDECIMAL_POS], o, ['mload', MAXDECIMAL_POS]], typ='decimal', pos=getpos(expr))
-    else:
-        return o
+    raise Exception("Unsupported operator: %r" % ast.dump(expr))
+
 
 # Unwrap location
 def unwrap_location(orig):
@@ -821,6 +799,7 @@ def unwrap_location(orig):
     else:
         return orig
 
+
 # Parse an expression that represents an address in memory or storage
 def parse_variable_location(expr, context):
     o = parse_expr(expr, context)
@@ -828,9 +807,11 @@ def parse_variable_location(expr, context):
         raise Exception("Looking for a variable location, instead got a value")
     return o
 
+
 # Parse an expression that results in a value
 def parse_value_expr(expr, context):
     return unwrap_location(parse_expr(expr, context))
+
 
 # Convert from one base type to another
 def base_type_conversion(orig, frm, to):
@@ -847,6 +828,7 @@ def base_type_conversion(orig, frm, to):
         return LLLnode.from_list(0, typ=to)
     else:
         raise TypeMismatchException("Typecasting from base type %r to %r unavailable" % (frm, to))
+
 
 # Create an x=y statement, where the types may be compound
 def make_setter(left, right, location):
@@ -953,6 +935,7 @@ def make_setter(left, right, location):
     else:
         raise Exception("Invalid type for setters")
 
+
 # Parse a statement (usually one line of code but not always)
 def parse_stmt(stmt, context):
     if isinstance(stmt, ast.Expr):
@@ -998,8 +981,14 @@ def parse_stmt(stmt, context):
         if isinstance(stmt.func, ast.Name) and stmt.func.id in stmt_dispatch_table:
             return stmt_dispatch_table[stmt.func.id](stmt, context)
         elif isinstance(stmt.func, ast.Attribute) and isinstance(stmt.func.value, ast.Name) and stmt.func.value.id == "self":
-            inargs, inargsize = pack_arguments(context, 'self', stmt.func.attr, [parse_expr(arg, context) for arg in stmt.args])
-            return LLLnode.from_list(['assert', ['call', ['gas'], ['address'], 0, inargs, inargsize, 0, 0]], typ=None, pos=getpos(stmt))
+            if stmt.func.attr not in context.sigs['self']:
+                raise VariableDeclarationException("Function not declared yet (reminder: functions cannot "
+                                                   "call functions later in code than themselves): %s" % stmt.func.attr)
+            inargs, inargsize = pack_arguments(context.sigs['self'][stmt.func.attr],
+                                               [parse_expr(arg, context) for arg in stmt.args],
+                                               context)
+            return LLLnode.from_list(['assert', ['call', ['gas'], ['address'], 0, inargs, inargsize, 0, 0]],
+                                     typ=None, pos=getpos(stmt))
         else:
             raise StructureException("Unsupported operator: %r" % ast.dump(stmt), stmt)
     # Asserts
@@ -1019,32 +1008,30 @@ def parse_stmt(stmt, context):
                 raise StructureException("Repeat must have a nonzero positive integral number of rounds", stmt.iter)
             start = LLLnode.from_list(0, typ='num', pos=getpos(stmt))
             rounds = stmt.iter.args[0].n
-        elif len(stmt.iter.args) == 2:
-            if isinstance(stmt.iter.args[0], ast.Num) and isinstance(stmt.iter.args[1], ast.Num):
-                # Type 2 for, eg. for i in range(100, 110): ...
-                start = LLLnode.from_list(stmt.iter.args[0].n, typ='num', pos=getpos(stmt))
-                rounds = LLLnode.from_list(stmt.iter.args[1].n - stmt.iter.args[0].n, typ='num', pos=getpos(stmt))
-            else:
-                # Type 3 for, eg. for i in range(x, x + 10): ...
-                if not isinstance(stmt.iter.args[1], ast.BinOp) or not isinstance(stmt.iter.args[1].op, ast.Add):
-                    raise StructureException("Two-arg for statements must be of the form `for i in range(start, start + rounds): ...`",
-                                             stmt.iter.args[1])
-                if ast.dump(stmt.iter.args[0]) != ast.dump(stmt.iter.args[1].left):
-                    raise StructureException("Two-arg for statements of the form `for i in range(x, x + y): ...` must have x identical in both places: %r %r" % (ast.dump(stmt.iter.args[0]), ast.dump(stmt.iter.args[1].left)), stmt.iter)
-                if not isinstance(stmt.iter.args[1].right, ast.Num):
-                    raise StructureException("Repeat must have a nonzero positive integral number of rounds", stmt.iter.args[1])
-                start = parse_value_expr(stmt.iter.args[0], context)
-                rounds = stmt.iter.args[1].right.n
+        elif isinstance(stmt.iter.args[0], ast.Num) and isinstance(stmt.iter.args[1], ast.Num):
+            # Type 2 for, eg. for i in range(100, 110): ...
+            start = LLLnode.from_list(stmt.iter.args[0].n, typ='num', pos=getpos(stmt))
+            rounds = LLLnode.from_list(stmt.iter.args[1].n - stmt.iter.args[0].n, typ='num', pos=getpos(stmt))
+        else:
+            # Type 3 for, eg. for i in range(x, x + 10): ...
+            if not isinstance(stmt.iter.args[1], ast.BinOp) or not isinstance(stmt.iter.args[1].op, ast.Add):
+                raise StructureException("Two-arg for statements must be of the form `for i in range(start, start + rounds): ...`",
+                                         stmt.iter.args[1])
+            if ast.dump(stmt.iter.args[0]) != ast.dump(stmt.iter.args[1].left):
+                raise StructureException("Two-arg for statements of the form `for i in range(x, x + y): ...` must have x identical in both places: %r %r" % (ast.dump(stmt.iter.args[0]), ast.dump(stmt.iter.args[1].left)), stmt.iter)
+            if not isinstance(stmt.iter.args[1].right, ast.Num):
+                raise StructureException("Repeat must have a nonzero positive integral number of rounds", stmt.iter.args[1])
+            start = parse_value_expr(stmt.iter.args[0], context)
+            rounds = stmt.iter.args[1].right.n
         varname = stmt.target.id
-        pos = context.vars[varname][0] if varname in context.forvars else context.new_variable(varname, BaseType('num'))
+        pos = context.vars[varname].pos if varname in context.forvars else context.new_variable(varname, BaseType('num'))
         o = LLLnode.from_list(['repeat', pos, start, rounds, parse_body(stmt.body, context)], typ=None, pos=getpos(stmt))
         context.forvars[varname] = True
         return o
-    # Creating a new memory variable and assigning it
+    # +=, *=, etc
     elif isinstance(stmt, ast.AugAssign):
         target = parse_variable_location(stmt.target, context)
         sub = parse_value_expr(stmt.value, context)
-        #sub = base_type_conversion(sub, sub.typ, target.typ)
         if not isinstance(stmt.op, (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Mod)):
             raise Exception("Unsupported operator for augassign")
         if not isinstance(target.typ, BaseType):
@@ -1113,8 +1100,6 @@ def parse_stmt(stmt, context):
         # Returning a list
         elif isinstance(sub.typ, ListType):
             if sub.location == "memory" and sub.value != "multi":
-                new_sub = LLLnode.from_list(context.new_placeholder(context.return_type), typ=context.return_type, location='memory')
-                make_setter(new_sub, sub, 'memory')
                 return LLLnode.from_list(['return', sub, get_size_of_type(context.return_type) * 32],
                                          typ=None, pos=getpos(stmt))
             else:
@@ -1129,17 +1114,14 @@ def parse_stmt(stmt, context):
     else:
         raise StructureException("Unsupported statement type", stmt)
 
+
 # Pack function arguments for a call
-def pack_arguments(context, type_name, method_name, args):
-    if method_name not in context.sigs[type_name]:
-        raise VariableDeclarationException("Function not declared yet (reminder: functions cannot call functions later in code than themselves): %s" % method_name)
-    types, _, method_id, _, _ = context.sigs[type_name][method_name]
-    placeholder_typ = ByteArrayType(maxlen=sum([get_size_of_type(typ) for typ in types]) * 32 + 32)
+def pack_arguments(signature, args, context):
+    placeholder_typ = ByteArrayType(maxlen=sum([get_size_of_type(arg.typ) for arg in signature.args]) * 32 + 32)
     placeholder = context.new_placeholder(placeholder_typ)
-    setters = [['mstore', placeholder, method_id]]
-    offset = 0
+    setters = [['mstore', placeholder, signature.method_id]]
     needpos = False
-    for i, (arg, typ) in enumerate(zip(args, types)):
+    for i, (arg, typ) in enumerate(zip(args, [arg.typ for arg in signature.args])):
         if isinstance(typ, BaseType):
             setters.append(make_setter(LLLnode.from_list(placeholder + 32 + i * 32, typ=typ), arg, 'memory'))
         elif isinstance(typ, ByteArrayType):
@@ -1159,6 +1141,7 @@ def pack_arguments(context, type_name, method_name, args):
     else:
         return LLLnode.from_list(['seq'] + setters + [placeholder + 28], typ=placeholder_typ, location='memory'), \
             placeholder_typ.maxlen - 28
+
 
 def parse_to_lll(kode):
     code = parse(kode)

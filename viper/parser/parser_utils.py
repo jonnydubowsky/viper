@@ -1,19 +1,23 @@
 import re
 
-from .exceptions import TypeMismatchException
-from .opcodes import comb_opcodes
-from .types import (
+from viper.exceptions import TypeMismatchException
+from viper.opcodes import comb_opcodes
+from viper.types import (
     BaseType,
     ByteArrayType,
     NodeType,
     NullType,
+    StructType,
+    MappingType,
+    TupleType,
+    ListType,
 )
-from .utils import (
-    MAXNUM_POS,
-    MINNUM_POS,
-    FREE_LOOP_INDEX,
+from viper.types import (
+    is_base_type,
+    are_units_compatible,
+    get_size_of_type
 )
-from .utils import ceil32
+from viper.utils import MemoryPositions, DECIMAL_DIVISOR
 
 
 class NullAttractor():
@@ -62,6 +66,9 @@ class LLLnode():
                     if arg.valency == 0:
                         raise Exception("Can't have a zerovalent argument to an opcode or a pseudo-opcode! %r" % arg)
                     self.gas += arg.gas
+                # Dynamic gas cost: 8 gas for each byte of logging data
+                if self.value.upper()[0:3] == 'LOG' and isinstance(self.args[1].value, int):
+                    self.gas += self.args[1].value * 8
                 # Dynamic gas cost: non-zero-valued call
                 if self.value.upper() == 'CALL' and self.args[2].value != 0:
                     self.gas += 34000
@@ -70,7 +77,12 @@ class LLLnode():
                     self.gas += 15000
                 # Dynamic gas cost: calldatacopy
                 elif self.value.upper() in ('CALLDATACOPY', 'CODECOPY'):
-                    self.gas += ceil32(self.args[2].value) // 32 * 3
+                    pass
+                    # TODO FIX GAS ESTIMATION IN ANOTHER PR
+                    # self.gas += ceil32(self.args[2].value) // 32 * 3
+                # Gas limits in call
+                if self.value.upper() == 'CALL' and isinstance(self.args[0].value, int):
+                    self.gas += self.args[0].value
             # If statements
             elif self.value == 'if':
                 if len(self.args) == 3:
@@ -107,7 +119,11 @@ class LLLnode():
                 if self.args[3].valency:
                     raise Exception("Third argument to repeat (clause to be repeated) must be zerovalent: %r" % self.args[3])
                 self.valency = 0
-                self.gas = (self.args[2].gas + 50) * self.args[0].value + 30
+                if self.args[1].value == 'mload' or self.args[1].value == 'sload':
+                    rounds = self.args[2].value
+                else:
+                    rounds = abs(self.args[2].value - self.args[1].value)
+                self.gas = rounds * (self.args[3].gas + 50) + 30
             # Seq statements: seq <statement> <statement> ...
             elif self.value == 'seq':
                 self.valency = self.args[-1].valency if self.args else 0
@@ -260,31 +276,31 @@ def make_byte_slice_copier(destination, source, length, max_length):
     if isinstance(source.typ, NullType):
         loader = 0
     elif source.location == "memory":
-        loader = ['mload', ['add', '_pos', ['mul', 32, ['mload', FREE_LOOP_INDEX]]]]
+        loader = ['mload', ['add', '_pos', ['mul', 32, ['mload', MemoryPositions.FREE_LOOP_INDEX]]]]
     elif source.location == "storage":
-        loader = ['sload', ['add', '_pos', ['mload', FREE_LOOP_INDEX]]]
+        loader = ['sload', ['add', '_pos', ['mload', MemoryPositions.FREE_LOOP_INDEX]]]
     else:
         raise Exception("Unsupported location:" + source.location)
     # Where to paste it?
     if destination.location == "memory":
-        setter = ['mstore', ['add', '_opos', ['mul', 32, ['mload', FREE_LOOP_INDEX]]], loader]
+        setter = ['mstore', ['add', '_opos', ['mul', 32, ['mload', MemoryPositions.FREE_LOOP_INDEX]]], loader]
     elif destination.location == "storage":
-        setter = ['sstore', ['add', '_opos', ['mload', FREE_LOOP_INDEX]], loader]
+        setter = ['sstore', ['add', '_opos', ['mload', MemoryPositions.FREE_LOOP_INDEX]], loader]
     else:
         raise Exception("Unsupported location:" + destination.location)
     # Check to see if we hit the length
-    checker = ['if', ['gt', ['mul', 32, ['mload', FREE_LOOP_INDEX]], '_actual_len'], 'break']
+    checker = ['if', ['gt', ['mul', 32, ['mload', MemoryPositions.FREE_LOOP_INDEX]], '_actual_len'], 'break']
     # Make a loop to do the copying
     o = ['with', '_pos', source,
             ['with', '_opos', destination,
                 ['with', '_actual_len', length,
-                    ['repeat', FREE_LOOP_INDEX, 0, (max_length + 31) // 32,
+                    ['repeat', MemoryPositions.FREE_LOOP_INDEX, 0, (max_length + 31) // 32,
                         ['seq', checker, setter]]]]]
     return LLLnode.from_list(o, typ=None, annotation='copy byte slice')
 
 
 # Takes a <32 byte array as input, and outputs a number.
-def byte_array_to_num(arg, expr, out_type):
+def byte_array_to_num(arg, expr, out_type, offset=32,):
     if arg.location == "memory":
         lengetter = LLLnode.from_list(['mload', '_sub'], typ=BaseType('num'))
         first_el_getter = LLLnode.from_list(['mload', ['add', 32, '_sub']], typ=BaseType('num'))
@@ -293,11 +309,11 @@ def byte_array_to_num(arg, expr, out_type):
         first_el_getter = LLLnode.from_list(['sload', ['add', 1, ['sha3_32', '_sub']]], typ=BaseType('num'))
     if out_type == 'num':
         result = ['clamp',
-                     ['mload', MINNUM_POS],
+                     ['mload', MemoryPositions.MINNUM],
                      ['div', '_el1', ['exp', 256, ['sub', 32, '_len']]],
-                     ['mload', MAXNUM_POS]]
+                     ['mload', MemoryPositions.MAXNUM]]
     elif out_type == 'num256':
-        result = ['div', '_el1', ['exp', 256, ['sub', 32, '_len']]]
+        result = ['div', '_el1', ['exp', 256, ['sub', offset, '_len']]]
     return LLLnode.from_list(['with', '_sub', arg,
                                  ['with', '_el1', first_el_getter,
                                     ['with', '_len', ['clamp', 0, lengetter, 32],
@@ -316,3 +332,100 @@ def get_length(arg):
 
 def getpos(node):
     return (node.lineno, node.col_offset)
+
+
+# Take a value representing a memory or storage location, and descend down to an element or member variable
+def add_variable_offset(parent, key):
+    typ, location = parent.typ, parent.location
+    if isinstance(typ, (StructType, TupleType)):
+        if isinstance(typ, StructType):
+            if not isinstance(key, str):
+                raise TypeMismatchException("Expecting a member variable access; cannot access element %r" % key)
+            if key not in typ.members:
+                raise TypeMismatchException("Object does not have member variable %s" % key)
+            subtype = typ.members[key]
+            attrs = sorted(typ.members.keys())
+
+            if key not in attrs:
+                raise TypeMismatchException("Member %s not found. Only the following available: %s" % (key, " ".join(attrs)))
+            index = attrs.index(key)
+            annotation = key
+        else:
+            if not isinstance(key, int):
+                raise TypeMismatchException("Expecting a static index; cannot access element %r" % key)
+            attrs = list(range(len(typ.members)))
+            index = key
+            annotation = None
+        if location == 'storage':
+            return LLLnode.from_list(['add', ['sha3_32', parent], LLLnode.from_list(index, annotation=annotation)],
+                                     typ=subtype,
+                                     location='storage')
+        elif location == 'storage_prehashed':
+            return LLLnode.from_list(['add', parent, LLLnode.from_list(index, annotation=annotation)],
+                                     typ=subtype,
+                                     location='storage')
+        elif location == 'memory':
+            offset = 0
+            for i in range(index):
+                offset += 32 * get_size_of_type(typ.members[attrs[i]])
+            return LLLnode.from_list(['add', offset, parent],
+                                     typ=typ.members[key],
+                                     location='memory',
+                                     annotation=annotation)
+        else:
+            raise TypeMismatchException("Not expecting a member variable access")
+    elif isinstance(typ, (ListType, MappingType)):
+        if isinstance(typ, ListType):
+            subtype = typ.subtype
+            sub = ['uclamplt', base_type_conversion(key, key.typ, BaseType('num')), typ.count]
+        else:
+            subtype = typ.valuetype
+            sub = base_type_conversion(key, key.typ, typ.keytype)
+        if location == 'storage':
+            return LLLnode.from_list(['add', ['sha3_32', parent], sub],
+                                     typ=subtype,
+                                     location='storage')
+        elif location == 'storage_prehashed':
+            return LLLnode.from_list(['add', parent, sub],
+                                     typ=subtype,
+                                     location='storage')
+        elif location == 'memory':
+            if isinstance(typ, MappingType):
+                raise TypeMismatchException("Can only have fixed-side arrays in memory, not mappings")
+            offset = 32 * get_size_of_type(subtype)
+            return LLLnode.from_list(['add', ['mul', offset, sub], parent],
+                                      typ=subtype,
+                                      location='memory')
+        else:
+            raise TypeMismatchException("Not expecting an array access ")
+    else:
+        raise TypeMismatchException("Cannot access the child of a constant variable! %r" % typ)
+
+
+# Convert from one base type to another
+def base_type_conversion(orig, frm, to, pos=None):
+    orig = unwrap_location(orig)
+    if not isinstance(frm, (BaseType, NullType)) or not isinstance(to, BaseType):
+        raise TypeMismatchException("Base type conversion from or to non-base type: %r %r" % (frm, to), pos)
+    elif is_base_type(frm, to.typ) and are_units_compatible(frm, to):
+        return LLLnode(orig.value, orig.args, typ=to)
+    elif is_base_type(frm, 'num') and is_base_type(to, 'decimal') and are_units_compatible(frm, to):
+        return LLLnode.from_list(['mul', orig, DECIMAL_DIVISOR], typ=BaseType('decimal', to.unit, to.positional))
+    elif is_base_type(frm, 'num256') and is_base_type(to, 'num') and are_units_compatible(frm, to):
+        return LLLnode.from_list(['uclample', orig, ['mload', MemoryPositions.MAXNUM]], typ=BaseType("num"))
+    elif isinstance(frm, NullType):
+        if to.typ not in ('num', 'bool', 'num256', 'address', 'bytes32', 'decimal'):
+            raise TypeMismatchException("Cannot convert null-type object to type %r" % to, pos)
+        return LLLnode.from_list(0, typ=to)
+    else:
+        raise TypeMismatchException("Typecasting from base type %r to %r unavailable" % (frm, to), pos)
+
+
+# Unwrap location
+def unwrap_location(orig):
+    if orig.location == 'memory':
+        return LLLnode.from_list(['mload', orig], typ=orig.typ)
+    elif orig.location == 'storage':
+        return LLLnode.from_list(['sload', orig], typ=orig.typ)
+    else:
+        return orig

@@ -1,6 +1,6 @@
 [![Join the chat at https://gitter.im/bethereum/viper](https://badges.gitter.im/ethereum/viper.svg)](https://gitter.im/ethereum/viper?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
 [![Build Status](https://travis-ci.org/ethereum/viper.svg?branch=master)](https://travis-ci.org/ethereum/viper)
-[![Documentation Status](https://readthedocs.org/projects/eth-viper/badge/?version=latest)](http://eth-viper.readthedocs.io/en/latest/?badge=latest)
+[![Documentation Status](https://readthedocs.org/projects/viper/badge/?version=latest)](http://viper.readthedocs.io/en/latest/?badge=latest)
 [![Coverage Status](https://coveralls.io/repos/github/ethereum/viper/badge.svg?branch=master)](https://coveralls.io/github/ethereum/viper?branch=master)
 
 # Principles and Goals
@@ -31,7 +31,7 @@ Viper does NOT strive to be a 100% replacement for everything that can be done i
 **Note: Viper is still alpha software, use with care**
 
 # Installation 
-See the [Viper documentation](https://eth-viper.readthedocs.io/en/latest/installing-viper.html)
+See the [Viper documentation](https://viper.readthedocs.io/en/latest/installing-viper.html)
 for build instructions.
 
 # Compiling a contract
@@ -42,6 +42,12 @@ To compile a contract, use:
 
 **Note: Since .vy is not official a language supported by any syntax highlights or linter,
 it is recommended to name your viper file into `.v.py` to have a python highlights.**
+
+There is also an [online compiler](https://viper.tools/) available you can use to experiment with
+the language and compile to ``bytecode`` and/or ``LLL``.
+
+**Note: While the viper version of the online compiler is updated on a regular basis it might
+be a bit behind the latest version found in the master branch of this repository.**
 
 ## Testing (using pytest)
 ```bash
@@ -54,4 +60,4 @@ For testing strategy, please see [Testing](no-link)
 * See Issues tab, and feel free to submit your own issues 
 * Add PRs if you discover a solution to an existing issue
 * For further discussions and questions talk to us on [gitter](https://gitter.im/ethereum/viper)
-* For more information, see [Contributing](http://eth-viper.readthedocs.io/en/latest/contributing.html)
+* For more information, see [Contributing](http://viper.readthedocs.io/en/latest/contributing.html)

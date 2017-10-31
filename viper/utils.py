@@ -1,5 +1,9 @@
 import binascii
+
+from collections import OrderedDict
+from . exceptions import InvalidLiteralException
 from .opcodes import opcodes
+
 try:
     from Crypto.Hash import keccak
     sha3 = lambda x: keccak.new(digest_bits=256, data=x).digest()
@@ -11,6 +15,17 @@ except ImportError:
 # Converts for bytes to an integer
 def fourbytes_to_int(inp):
     return (inp[0] << 24) + (inp[1] << 16) + (inp[2] << 8) + inp[3]
+
+
+# Converts string to bytes
+def string_to_bytes(str):
+    bytez = b''
+    for c in str:
+        if ord(c) >= 256:
+            raise InvalidLiteralException("Cannot insert special character %r into byte array" % c)
+        bytez += bytes([ord(c)])
+    bytez_length = len(bytez)
+    return bytez, bytez_length
 
 
 # Converts a provided hex string to an integer
@@ -54,18 +69,41 @@ def calc_mem_gas(memsize):
 # A decimal value can store multiples of 1/DECIMAL_DIVISOR
 DECIMAL_DIVISOR = 10000000000
 
-# Number of bytes in memory used for system purposes, not for variables
-RESERVED_MEMORY = 320
-ADDRSIZE_POS = 32
-MAXNUM_POS = 64
-MINNUM_POS = 96
-MAXDECIMAL_POS = 128
-MINDECIMAL_POS = 160
-FREE_VAR_SPACE = 192
-BLANK_SPACE = 224
-FREE_LOOP_INDEX = 256
 
-RLP_DECODER_ADDRESS = hex_to_int('0xCb969cAAad21A78a24083164ffa81604317Ab603'[2:])
+# Number of bytes in memory used for system purposes, not for variables
+class MemoryPositions:
+    RESERVED_MEMORY = 320
+    ADDRSIZE = 32
+    MAXNUM = 64
+    MINNUM = 96
+    MAXDECIMAL = 128
+    MINDECIMAL = 160
+    FREE_VAR_SPACE = 192
+    BLANK_SPACE = 224
+    FREE_LOOP_INDEX = 256
+
+
+# Sizes of different data types. Used to clamp types.
+class SizeLimits:
+    ADDRSIZE = 2**160
+    MAXNUM = 2**127 - 1
+    MINNUM = -2**127
+    MAXDECIMAL = (2**127 - 1) * DECIMAL_DIVISOR
+    MINDECIMAL = (-2**127) * DECIMAL_DIVISOR
+
+
+# Map representing all limits loaded into a contract as part of the initializer
+# code.
+LOADED_LIMIT_MAP = OrderedDict((
+    (MemoryPositions.ADDRSIZE, SizeLimits.ADDRSIZE),
+    (MemoryPositions.MAXNUM, SizeLimits.MAXNUM),
+    (MemoryPositions.MINNUM, SizeLimits.MINNUM),
+    (MemoryPositions.MAXDECIMAL, SizeLimits.MAXDECIMAL),
+    (MemoryPositions.MINDECIMAL, SizeLimits.MINDECIMAL),
+))
+
+
+RLP_DECODER_ADDRESS = hex_to_int('0x6b2A423C7915e984ebCD3aD2B86ba815A7D4ae6d'[2:])
 
 # Instructions for creating RLP decoder on other chains
 # First send 6270960000000000 wei to 0xd2c560282c9C02465C2dAcdEF3E859E730848761

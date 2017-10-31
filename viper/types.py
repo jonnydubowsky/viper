@@ -48,10 +48,12 @@ class NodeType():
 
 # Data structure for a type that representsa 32-byte object
 class BaseType(NodeType):
-    def __init__(self, typ, unit=False, positional=False):
+
+    def __init__(self, typ, unit=False, positional=False, override_signature=False):
         self.typ = typ
         self.unit = {} if unit is False else unit
         self.positional = positional
+        self.override_signature = override_signature
 
     def __eq__(self, other):
         return other.__class__ == BaseType and self.typ == other.typ and self.unit == other.unit and self.positional == other.positional
@@ -126,7 +128,7 @@ class TupleType(NodeType):
         return other.__class__ == StructType and other.members == self.members
 
     def __repr__(self):
-        return '[' + ', '.join([repr(m) for m in self.members]) + ']'
+        return '(' + ', '.join([repr(m) for m in self.members]) + ')'
 
 
 # Data structure for a "multi" object with a mixed type
@@ -142,18 +144,30 @@ class NullType(NodeType):
 
 
 # Convert type into common form used in ABI
-def canonicalize_type(t):
+def canonicalize_type(t, is_event=False):
     if isinstance(t, ByteArrayType):
-        return 'bytes'
+        # Check to see if maxlen is small enough for events
+        if is_event and t.maxlen <= 32:
+            return 'bytes{}'.format(t.maxlen)
+        else:
+            return 'bytes'
     if isinstance(t, ListType):
         if not isinstance(t.subtype, (ListType, BaseType)):
             raise Exception("List of byte arrays not allowed")
         return canonicalize_type(t.subtype) + "[%d]" % t.count
+    if isinstance(t, TupleType):
+        return "({})".format(
+            ",".join(canonicalize_type(x) for x in t.subtypes)
+        )
     if not isinstance(t, BaseType):
         raise Exception("Cannot canonicalize non-base type: %r" % t)
+    num256_override = True if t.override_signature == 'num256' else False
+
     t = t.typ
-    if t == 'num':
+    if t == 'num' and not num256_override:
         return 'int128'
+    elif t == 'num' and num256_override:
+        return 'uint256'
     elif t == 'decimal':
         return 'decimal10'
     elif t == 'bool':
@@ -250,6 +264,9 @@ def parse_type(item, location):
             argz = item.args
         if len(argz) != 1:
             raise InvalidTypeException("Malformed unit type", item)
+        # Check for num256 to num casting
+        if item.func.id == 'num' and getattr(item.args[0], 'id', '') == 'num256':
+            return BaseType('num', override_signature='num256')
         unit = parse_unit(argz[0])
         return BaseType(base_type, unit, positional)
     # Subscripts
@@ -287,6 +304,9 @@ def parse_type(item, location):
         if not isinstance(item.comparators[0].n, int) or item.comparators[0].n <= 0:
             raise InvalidTypeException("Bad byte array length: %r" % item.comparators[0].n, item.comparators[0])
         return ByteArrayType(item.comparators[0].n)
+    elif isinstance(item, ast.Tuple):
+        members = [parse_type(x, location) for x in item.elts]
+        return TupleType(members)
     else:
         raise InvalidTypeException("Invalid type: %r" % ast.dump(item), item)
 
@@ -332,7 +352,9 @@ def set_default_units(typ):
 
 # Checks that the units of frm can be seamlessly converted into the units of to
 def are_units_compatible(frm, to):
-    return frm.unit is None or (frm.unit == to.unit and frm.positional == to.positional)
+    frm_unit = getattr(frm, 'unit', 0)
+    to_unit = getattr(to, 'unit', 0)
+    return frm_unit is None or (frm_unit == to_unit and frm.positional == to.positional)
 
 
 # Is a type representing a number?

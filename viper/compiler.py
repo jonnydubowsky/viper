@@ -1,4 +1,4 @@
-from . import parser
+from viper.parser import parser
 from . import compile_lll
 from . import optimizer
 
@@ -15,9 +15,11 @@ def compile(code, *args, **kwargs):
 def gas_estimate(origcode, *args, **kwargs):
     o = {}
     code = optimizer.optimize(parser.parse_to_lll(origcode))
+
     # Extract the stuff inside the LLL bracket
     if code.value == 'seq':
-        code = code.args[-1].args[1].args[0]
+        if code.args[-1].value == 'return':
+            code = code.args[-1].args[1].args[0]
     else:
         code = code.args[1].args[0]
     assert code.value == 'seq'
@@ -34,7 +36,7 @@ def mk_full_signature(code, *args, **kwargs):
     for idx, func in enumerate(abi):
         func_name = func['name'].split('(')[0]
         # Skip __init__, has no estimate
-        if func_name != '__init__':
+        if func_name in abi and func_name != '__init__':
             abi[idx]['gas'] = gas_estimates[func_name]
     return abi
 

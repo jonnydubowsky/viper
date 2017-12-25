@@ -113,6 +113,9 @@ RLP_DECODER_ADDRESS = hex_to_int('0x6b2A423C7915e984ebCD3aD2B86ba815A7D4ae6d'[2:
 # Available base types
 base_types = ['num', 'decimal', 'bytes32', 'num256', 'signed256', 'bool', 'address']
 
+# Keywords available for ast.Call type
+valid_call_keywords = ['num', 'decimal', 'address', 'contract', 'indexed']
+
 # Valid base units
 valid_units = ['currency', 'wei', 'currency1', 'currency2', 'sec', 'm', 'kg']
 
@@ -120,7 +123,7 @@ valid_units = ['currency', 'wei', 'currency1', 'currency2', 'sec', 'm', 'kg']
 reserved_words = ['int128', 'int256', 'uint256', 'address', 'bytes32',
                   'real', 'real128x128', 'if', 'for', 'while', 'until',
                   'pass', 'def', 'push', 'dup', 'swap', 'send', 'call',
-                  'suicide', 'selfdestruct', 'assert', 'stop', 'throw',
+                  'selfdestruct', 'assert', 'stop', 'throw',
                   'raise', 'init', '_init_', '___init___', '____init____',
                   'true', 'false', 'self', 'this', 'continue', 'ether',
                   'wei', 'finney', 'szabo', 'shannon', 'lovelace', 'ada',

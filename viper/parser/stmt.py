@@ -1,4 +1,5 @@
 import ast
+import re
 
 from viper.exceptions import (
     ConstancyViolationException,
@@ -69,6 +70,8 @@ class Stmt(object):
         return LLLnode.from_list('pass', typ=None, pos=getpos(self.stmt))
 
     def ann_assign(self):
+        if self.stmt.value is not None:
+            raise StructureException('May not assign value whilst defining type', self.stmt)
         typ = parse_type(self.stmt.annotation, location='memory')
         varname = self.stmt.target.id
         pos = self.context.new_variable(varname, typ)
@@ -87,11 +90,8 @@ class Stmt(object):
             variable_loc = LLLnode.from_list(pos, typ=sub.typ, location='memory', pos=getpos(self.stmt), annotation=self.stmt.targets[0].id)
             o = make_setter(variable_loc, sub, 'memory', pos=getpos(self.stmt))
         else:
-            target = Expr.parse_variable_location(self.stmt.targets[0], self.context)
-            if target.location == 'storage' and self.context.is_constant:
-                raise ConstancyViolationException("Cannot modify storage inside a constant function!", self.stmt.targets[0])
-            if not target.mutable:
-                raise ConstancyViolationException("Cannot modify function argument", self.stmt.targets[0])
+            # Checks to see if assignment is valid
+            target = self.get_target(self.stmt.targets[0])
             o = make_setter(target, sub, target.location, pos=getpos(self.stmt))
         o.pos = getpos(self.stmt)
         return o
@@ -116,31 +116,47 @@ class Stmt(object):
         if isinstance(self.stmt.func, ast.Name) and self.stmt.func.id in stmt_dispatch_table:
                 return stmt_dispatch_table[self.stmt.func.id](self.stmt, self.context)
         elif isinstance(self.stmt.func, ast.Attribute) and isinstance(self.stmt.func.value, ast.Name) and self.stmt.func.value.id == "self":
-            if self.stmt.func.attr not in self.context.sigs['self']:
+            method_name = self.stmt.func.attr
+            if method_name not in self.context.sigs['self']:
                 raise VariableDeclarationException("Function not declared yet (reminder: functions cannot "
                                                     "call functions later in code than themselves): %s" % self.stmt.func.attr)
+            add_gas = self.context.sigs['self'][method_name].gas
             inargs, inargsize = pack_arguments(self.context.sigs['self'][self.stmt.func.attr],
                                                 [Expr(arg, self.context).lll_node for arg in self.stmt.args],
                                                 self.context)
             return LLLnode.from_list(['assert', ['call', ['gas'], ['address'], 0, inargs, inargsize, 0, 0]],
-                                        typ=None, pos=getpos(self.stmt))
+                                        typ=None, pos=getpos(self.stmt), add_gas_estimate=add_gas, annotation='Internal Call: %s' % method_name)
         elif isinstance(self.stmt.func, ast.Attribute) and isinstance(self.stmt.func.value, ast.Call):
-            return external_contract_call_stmt(self.stmt, self.context)
+            contract_name = self.stmt.func.value.func.id
+            contract_address = Expr.parse_value_expr(self.stmt.func.value.args[0], self.context)
+            return external_contract_call_stmt(self.stmt, self.context, contract_name, contract_address)
+        elif isinstance(self.stmt.func.value, ast.Attribute) and self.stmt.func.value.attr in self.context.sigs:
+            contract_name = self.stmt.func.value.attr
+            var = self.context.globals[self.stmt.func.value.attr]
+            contract_address = unwrap_location(LLLnode.from_list(var.pos, typ=var.typ, location='storage', pos=getpos(self.stmt), annotation='self.' + self.stmt.func.value.attr))
+            return external_contract_call_stmt(self.stmt, self.context, contract_name, contract_address)
+        elif isinstance(self.stmt.func.value, ast.Attribute) and self.stmt.func.value.attr in self.context.globals:
+            contract_name = self.context.globals[self.stmt.func.value.attr].typ.unit
+            var = self.context.globals[self.stmt.func.value.attr]
+            contract_address = unwrap_location(LLLnode.from_list(var.pos, typ=var.typ, location='storage', pos=getpos(self.stmt), annotation='self.' + self.stmt.func.value.attr))
+            return external_contract_call_stmt(self.stmt, self.context, contract_name, contract_address)
         elif isinstance(self.stmt.func, ast.Attribute) and self.stmt.func.value.id == 'log':
             if self.stmt.func.attr not in self.context.sigs['self']:
                 raise VariableDeclarationException("Event not declared yet: %s" % self.stmt.func.attr)
             event = self.context.sigs['self'][self.stmt.func.attr]
-            topics_types, topics = [], []
-            data_types, data = [], []
+            if len(event.indexed_list) != len(self.stmt.args):
+                raise VariableDeclarationException("%s received %s arguments but expected %s" % (event.name, len(self.stmt.args), len(event.indexed_list)))
+            expected_topics, topics = [], []
+            expected_data, data = [], []
             for pos, is_indexed in enumerate(event.indexed_list):
                 if is_indexed:
-                    topics_types.append(event.args[pos].typ)
+                    expected_topics.append(event.args[pos])
                     topics.append(self.stmt.args[pos])
                 else:
-                    data_types.append(event.args[pos].typ)
+                    expected_data.append(event.args[pos])
                     data.append(self.stmt.args[pos])
-            topics = pack_logging_topics(event.event_id, topics, topics_types, self.context)
-            inargs, inargsize, inarg_start = pack_logging_data(data_types, data, self.context)
+            topics = pack_logging_topics(event.event_id, topics, expected_topics, self.context)
+            inargs, inargsize, inarg_start = pack_logging_data(expected_data, data, self.context)
             return LLLnode.from_list(['seq', inargs, ["log" + str(len(topics)), inarg_start, inargsize] + topics], typ=None, pos=getpos(self.stmt))
         else:
             raise StructureException("Unsupported operator: %r" % ast.dump(self.stmt), self.stmt)
@@ -152,16 +168,21 @@ class Stmt(object):
         from .parser import (
             parse_body,
         )
+        # Type 0 for, eg. for i in list(): ...
+        if self._is_list_iter():
+            return self.parse_for_list()
+
         if not isinstance(self.stmt.iter, ast.Call) or \
             not isinstance(self.stmt.iter.func, ast.Name) or \
                 not isinstance(self.stmt.target, ast.Name) or \
                     self.stmt.iter.func.id != "range" or \
                         len(self.stmt.iter.args) not in (1, 2):
-            raise StructureException("For statements must be of the form `for i in range(rounds): ..` or `for i in range(start, start + rounds): ..`", self.stmt.iter)
+            raise StructureException("For statements must be of the form `for i in range(rounds): ..` or `for i in range(start, start + rounds): ..`", self.stmt.iter)  # noqa
+
         # Type 1 for, eg. for i in range(10): ...
         if len(self.stmt.iter.args) == 1:
             if not isinstance(self.stmt.iter.args[0], ast.Num):
-                raise StructureException("Repeat must have a nonzero positive integral number of rounds", self.stmt.iter)
+                raise StructureException("Range only accepts literal values", self.stmt.iter)
             start = LLLnode.from_list(0, typ='num', pos=getpos(self.stmt))
             rounds = self.stmt.iter.args[0].n
         elif isinstance(self.stmt.iter.args[0], ast.Num) and isinstance(self.stmt.iter.args[1], ast.Num):
@@ -176,25 +197,107 @@ class Stmt(object):
             if ast.dump(self.stmt.iter.args[0]) != ast.dump(self.stmt.iter.args[1].left):
                 raise StructureException("Two-arg for statements of the form `for i in range(x, x + y): ...` must have x identical in both places: %r %r" % (ast.dump(self.stmt.iter.args[0]), ast.dump(self.stmt.iter.args[1].left)), self.stmt.iter)
             if not isinstance(self.stmt.iter.args[1].right, ast.Num):
-                raise StructureException("Repeat must have a nonzero positive integral number of rounds", self.stmt.iter.args[1])
+                raise StructureException("Range only accepts literal values", self.stmt.iter.args[1])
             start = Expr.parse_value_expr(self.stmt.iter.args[0], self.context)
             rounds = self.stmt.iter.args[1].right.n
         varname = self.stmt.target.id
-        pos = self.context.vars[varname].pos if varname in self.context.forvars else self.context.new_variable(varname, BaseType('num'))
-        o = LLLnode.from_list(['repeat', pos, start, rounds, parse_body(self.stmt.body, self.context)], typ=None, pos=getpos(self.stmt))
+        pos = self.context.new_variable(varname, BaseType('num'))
         self.context.forvars[varname] = True
+        o = LLLnode.from_list(['repeat', pos, start, rounds, parse_body(self.stmt.body, self.context)], typ=None, pos=getpos(self.stmt))
+        del self.context.vars[varname]
+        del self.context.forvars[varname]
+        return o
+
+    def _is_list_iter(self):
+        """
+        Test if the current statement is a type of list, used in for loops.
+        """
+
+        # Check for literal or memory list.
+        iter_var_type = self.context.vars.get(self.stmt.iter.id).typ if isinstance(self.stmt.iter, ast.Name) else None
+        if isinstance(self.stmt.iter, ast.List) or isinstance(iter_var_type, ListType):
+            return True
+
+        # Check for storage list.
+        if isinstance(self.stmt.iter, ast.Attribute):
+            iter_var_type = self.context.globals.get(self.stmt.iter.attr)
+            if iter_var_type and isinstance(iter_var_type.typ, ListType):
+                return True
+
+        return False
+
+    def parse_for_list(self):
+        from .parser import (
+            parse_body,
+            make_setter
+        )
+
+        iter_list_node = Expr(self.stmt.iter, self.context).lll_node
+        if not isinstance(iter_list_node.typ.subtype, BaseType):  # Sanity check on list subtype.
+            raise StructureException('For loops allowed only on basetype lists.', self.stmt.iter)
+        iter_var_type = self.context.vars.get(self.stmt.iter.id).typ if isinstance(self.stmt.iter, ast.Name) else None
+        subtype = iter_list_node.typ.subtype.typ
+        varname = self.stmt.target.id
+        value_pos = self.context.new_variable(varname, BaseType(subtype))
+        i_pos = self.context.new_variable('_index_for_' + varname, BaseType(subtype))
+        self.context.forvars[varname] = True
+        if iter_var_type:  # Is a list that is already allocated to memory.
+            self.context.set_in_for_loop(self.stmt.iter.id)  # make sure list cannot be altered whilst iterating.
+            iter_var = self.context.vars.get(self.stmt.iter.id)
+            body = [
+                'seq',
+                ['mstore', value_pos, ['mload', ['add', iter_var.pos, ['mul', ['mload', i_pos], 32]]]],
+                parse_body(self.stmt.body, self.context)
+            ]
+            o = LLLnode.from_list(
+                ['repeat', i_pos, 0, iter_var.size, body], typ=None, pos=getpos(self.stmt)
+            )
+            self.context.remove_in_for_loop(self.stmt.iter.id)
+        elif isinstance(self.stmt.iter, ast.List):  # List gets defined in the for statement.
+            # Allocate list to memory.
+            count = iter_list_node.typ.count
+            tmp_list = LLLnode.from_list(
+                obj=self.context.new_placeholder(ListType(iter_list_node.typ.subtype, count)),
+                typ=ListType(iter_list_node.typ.subtype, count),
+                location='memory'
+            )
+            setter = make_setter(tmp_list, iter_list_node, 'memory')
+            body = [
+                'seq',
+                ['mstore', value_pos, ['mload', ['add', tmp_list, ['mul', ['mload', i_pos], 32]]]],
+                parse_body(self.stmt.body, self.context)
+            ]
+            o = LLLnode.from_list(
+                ['seq',
+                    setter,
+                    ['repeat', i_pos, 0, count, body]], typ=None, pos=getpos(self.stmt)
+            )
+        elif isinstance(self.stmt.iter, ast.Attribute):  # List is contained in storage.
+            count = iter_list_node.typ.count
+            self.context.set_in_for_loop(iter_list_node.annotation)  # make sure list cannot be altered whilst iterating.
+            body = [
+                'seq',
+                ['mstore', value_pos, ['sload', ['add', ['sha3_32', iter_list_node], ['mload', i_pos]]]],
+                parse_body(self.stmt.body, self.context),
+            ]
+            o = LLLnode.from_list(
+                ['seq',
+                    ['repeat', i_pos, 0, count, body]], typ=None, pos=getpos(self.stmt)
+            )
+            self.context.remove_in_for_loop(iter_list_node.annotation)
+        del self.context.vars[varname]
+        del self.context.vars['_index_for_' + varname]
+        del self.context.forvars[varname]
         return o
 
     def aug_assign(self):
-        target = Expr.parse_variable_location(self.stmt.target, self.context)
+        target = self.get_target(self.stmt.target)
         sub = Expr.parse_value_expr(self.stmt.value, self.context)
         if not isinstance(self.stmt.op, (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Mod)):
             raise Exception("Unsupported operator for augassign")
         if not isinstance(target.typ, BaseType):
             raise TypeMismatchException("Can only use aug-assign operators with simple types!", self.stmt.target)
         if target.location == 'storage':
-            if self.context.is_constant:
-                raise ConstancyViolationException("Cannot modify storage inside a constant function!", self.stmt.target)
             o = Expr.parse_value_expr(ast.BinOp(left=LLLnode.from_list(['sload', '_stloc'], typ=target.typ, pos=target.pos),
                                     right=sub, op=self.stmt.op, lineno=self.stmt.lineno, col_offset=self.stmt.col_offset), self.context)
             return LLLnode.from_list(['with', '_stloc', target, ['sstore', '_stloc', base_type_conversion(o, o.typ, target.typ)]], typ=None, pos=getpos(self.stmt))
@@ -217,6 +320,7 @@ class Stmt(object):
         if not self.stmt.value:
             raise TypeMismatchException("Expecting to return a value", self.stmt)
         sub = Expr(self.stmt.value, self.context).lll_node
+        self.context.increment_return_counter()
         # Returning a value (most common case)
         if isinstance(sub.typ, BaseType):
             if not isinstance(self.context.return_type, BaseType):
@@ -258,6 +362,15 @@ class Stmt(object):
                 raise Exception("Invalid location: %s" % sub.location)
 
         elif isinstance(sub.typ, ListType):
+            sub_base_type = re.split(r'\(|\[', str(sub.typ.subtype))[0]
+            ret_base_type = re.split(r'\(|\[', str(self.context.return_type.subtype))[0]
+            if sub_base_type != ret_base_type and sub.value != 'multi':
+                raise TypeMismatchException(
+                    "List return type %r does not match specified return type, expecting %r" % (
+                        sub_base_type, ret_base_type
+                    ),
+                    self.stmt
+                )
             if sub.location == "memory" and sub.value != "multi":
                 return LLLnode.from_list(['return', sub, get_size_of_type(self.context.return_type) * 32],
                                             typ=None, pos=getpos(self.stmt))
@@ -315,3 +428,28 @@ class Stmt(object):
                                         typ=None, pos=getpos(self.stmt))
         else:
             raise TypeMismatchException("Can only return base type!", self.stmt)
+
+    def get_target(self, target):
+        if isinstance(target, ast.Subscript) and self.context.in_for_loop:  # Check if we are doing assignment of an iteration loop.
+            raise_exception = False
+            if isinstance(target.value, ast.Attribute):
+                list_name = "%s.%s" % (target.value.value.id, target.value.attr)
+                if list_name in self.context.in_for_loop:
+                    raise_exception = True
+
+            if isinstance(target.value, ast.Name) and \
+               target.value.id in self.context.in_for_loop:
+                list_name = target.value.id
+                raise_exception = True
+
+            if raise_exception:
+                raise StructureException("Altering list '%s' which is being iterated!" % list_name, self.stmt)
+
+        if isinstance(target, ast.Name) and target.id in self.context.forvars:
+            raise StructureException("Altering iterator '%s' which is in use!" % target.id, self.stmt)
+        target = Expr.parse_variable_location(target, self.context)
+        if target.location == 'storage' and self.context.is_constant:
+            raise ConstancyViolationException("Cannot modify storage inside a constant function: %s" % target.annotation)
+        if not target.mutable:
+            raise ConstancyViolationException("Cannot modify function argument: %s" % target.annotation)
+        return target

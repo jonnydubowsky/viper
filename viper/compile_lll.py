@@ -27,6 +27,15 @@ def is_symbol(i):
     return isinstance(i, str) and i[:5] == '_sym_'
 
 
+def get_revert():
+    o = []
+    end_symbol = mksymbol()
+    o.extend([end_symbol, 'JUMPI'])
+    o.extend(['PUSH1', 0, 'DUP1', 'REVERT'])
+    o.extend([end_symbol, 'JUMPDEST'])
+    return o
+
+
 # Compiles LLL to assembly
 def compile_to_assembly(code, withargs=None, break_dest=None, height=0):
     if withargs is None:
@@ -54,6 +63,8 @@ def compile_to_assembly(code, withargs=None, break_dest=None, height=0):
         return ['DUP' + str(height - withargs[code.value])]
     # Setting variables connected to with statements
     elif code.value == "set":
+        if height - withargs[code.args[0].value] > 16:
+            raise Exception("With statement too deep")
         if len(code.args) != 2 or code.args[0].value not in withargs:
             raise Exception("Set expects two arguments, the first being a stack variable")
         return compile_to_assembly(code.args[1], withargs, break_dest, height) + \
@@ -93,7 +104,9 @@ def compile_to_assembly(code, withargs=None, break_dest=None, height=0):
     # Repeat(memloc, start, rounds, body)
     elif code.value == 'repeat':
         o = []
-        loops = num_to_bytearray(code.args[2].value) or [2]
+        loops = num_to_bytearray(code.args[2].value)
+        if not loops:
+            raise Exception("Number of times repeated must be a constant nonzero positive integer: %r" % loops)
         start, end = mksymbol(), mksymbol()
         o.extend(compile_to_assembly(code.args[0], withargs, break_dest, height))
         o.extend(compile_to_assembly(code.args[1], withargs, break_dest, height + 1))
@@ -151,35 +164,40 @@ def compile_to_assembly(code, withargs=None, break_dest=None, height=0):
     # Assert (if false, exit)
     elif code.value == 'assert':
         o = compile_to_assembly(code.args[0], withargs, break_dest, height)
-        o.extend(['ISZERO', 'PC', 'JUMPI'])
+        o.extend(get_revert())
         return o
     # Unsigned/signed clamp, check less-than
     elif code.value in ('uclamplt', 'uclample', 'clamplt', 'clample', 'uclampgt', 'uclampge', 'clampgt', 'clampge'):
         if isinstance(code.args[0].value, int) and isinstance(code.args[1].value, int):
-            if 0 <= code.args[0].value < code.args[1].value:
+            # Checks for clamp errors at compile time as opposed to run time
+            if code.value in ('uclamplt', 'clamplt') and 0 <= code.args[0].value < code.args[1].value or \
+            code.value in ('uclample', 'clample') and 0 <= code.args[0].value <= code.args[1].value or \
+            code.value in ('uclampgt', 'clampgt') and 0 <= code.args[0].value > code.args[1].value or \
+            code.value in ('uclampge', 'clampge') and 0 <= code.args[0].value >= code.args[1].value:
                 return compile_to_assembly(code.args[0], withargs, break_dest, height)
             else:
-                return ['INVALID']
+                raise Exception("Invalid %r with values %r and %r" % (code.value, code.args[0], code.args[1]))
         o = compile_to_assembly(code.args[0], withargs, break_dest, height)
         o.extend(compile_to_assembly(code.args[1], withargs, break_dest, height + 1))
         o.extend(['DUP2'])
         # Stack: num num bound
         if code.value == 'uclamplt':
-            o.extend(["LT", 'ISZERO', 'PC', 'JUMPI'])
+            o.extend(['LT'])
         elif code.value == "clamplt":
-            o.extend(["SLT", 'ISZERO', 'PC', 'JUMPI'])
+            o.extend(['SLT'])
         elif code.value == "uclample":
-            o.extend(["GT", 'PC', 'JUMPI'])
+            o.extend(['GT', 'ISZERO'])
         elif code.value == "clample":
-            o.extend(["SGT", 'PC', 'JUMPI'])
+            o.extend(['SGT', 'ISZERO'])
         elif code.value == 'uclampgt':
-            o.extend(["GT", 'ISZERO', 'PC', 'JUMPI'])
+            o.extend(['GT'])
         elif code.value == "clampgt":
-            o.extend(["SGT", 'ISZERO', 'PC', 'JUMPI'])
+            o.extend(['SGT'])
         elif code.value == "uclampge":
-            o.extend(["LT", 'PC', 'JUMPI'])
+            o.extend(['LT', 'ISZERO'])
         elif code.value == "clampge":
-            o.extend(["SLT", 'PC', 'JUMPI'])
+            o.extend(['SLT', 'ISZERO'])
+        o.extend(get_revert())
         return o
     # Signed clamp, check against upper and lower bounds
     elif code.value in ('clamp', 'uclamp'):
@@ -190,17 +208,19 @@ def compile_to_assembly(code, withargs=None, break_dest=None, height=0):
         o.extend(['DUP1'])
         o.extend(compile_to_assembly(code.args[2], withargs, break_dest, height + 3))
         o.extend(['SWAP1', comp1, 'PC', 'JUMPI'])
-        o.extend(['DUP1', 'SWAP2', 'SWAP1', comp2, 'PC', 'JUMPI'])
+        o.extend(['DUP1', 'SWAP2', 'SWAP1', comp2, 'ISZERO'])
+        o.extend(get_revert())
         return o
     # Checks that a value is nonzero
     elif code.value == 'clamp_nonzero':
         o = compile_to_assembly(code.args[0], withargs, break_dest, height)
-        o.extend(['DUP1', 'ISZERO', 'PC', 'JUMPI'])
+        o.extend(['DUP1'])
+        o.extend(get_revert())
         return o
     # SHA3 a single value
     elif code.value == 'sha3_32':
         o = compile_to_assembly(code.args[0], withargs, break_dest, height)
-        o.extend(['PUSH1', MemoryPositions.FREE_VAR_SPACE, 'MSTORE', 'PUSH1', MemoryPositions.FREE_VAR_SPACE, 'PUSH1', 32, 'SHA3'])
+        o.extend(['PUSH1', MemoryPositions.FREE_VAR_SPACE, 'MSTORE', 'PUSH1', 32, 'PUSH1', MemoryPositions.FREE_VAR_SPACE, 'SHA3'])
         return o
     # <= operator
     elif code.value == 'le':

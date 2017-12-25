@@ -183,11 +183,9 @@ def as_num256(expr, args, kwargs, context):
     if isinstance(args[0], int):
         if not(0 <= args[0] <= 2**256 - 1):
             raise InvalidLiteralException("Number out of range: " + str(expr.args[0].n), expr.args[0])
-        return LLLnode.from_list(args[0], typ=BaseType('num256', None), pos=getpos(expr))
+        return LLLnode.from_list(args[0], typ=BaseType('num256'), pos=getpos(expr))
     elif isinstance(args[0], LLLnode):
-        if args[0].value == "sub" and args[0].args[0].value == 0 and args[0].args[1].value > 0:
-            raise InvalidLiteralException("Negative numbers cannot be num256 literals")
-        return LLLnode(value=args[0].value, args=args[0].args, typ=BaseType('num256'), pos=getpos(expr))
+        return LLLnode.from_list(['clampge', args[0], 0], typ=BaseType('num256'), pos=getpos(expr))
     else:
         raise InvalidLiteralException("Invalid input for num256: %r" % args[0], expr)
 
@@ -291,7 +289,7 @@ def concat(expr, context):
     # Memory location of the output
     seq.append(placeholder)
     return LLLnode.from_list(
-        ['with', '_poz', 0, ['seq'] + seq], typ=ByteArrayType(total_maxlen), location='memory', pos=getpos(expr)
+        ['with', '_poz', 0, ['seq'] + seq], typ=ByteArrayType(total_maxlen), location='memory', pos=getpos(expr), annotation='concat'
     )
 
 
@@ -597,7 +595,7 @@ def _RLPlist(expr, args, kwargs, context):
         ['seq',
             ['with', '_sub', variable_pointer,
                 ['pop', ['call',
-                         10000 + 500 * len(_format) + 10 * len(args),
+                         1500 + 400 * len(_format) + 10 * len(args),
                          LLLnode.from_list(RLP_DECODER_ADDRESS, annotation='RLP decoder'),
                          0,
                          ['add', '_sub', 32],
@@ -653,8 +651,8 @@ def bitwise_xor(expr, args, kwargs, context):
 @signature('num256', 'num256')
 def num256_add(expr, args, kwargs, context):
     return LLLnode.from_list(['seq',
-                                # Checks that: a + b > a
-                                ['assert', ['or', ['iszero', args[1]], ['gt', ['add', args[0], args[1]], args[0]]]],
+                                # Checks that: a + b >= a
+                                ['assert', ['ge', ['add', args[0], args[1]], args[0]]],
                                 ['add', args[0], args[1]]], typ=BaseType('num256'), pos=getpos(expr))
 
 
@@ -693,12 +691,15 @@ def num256_exp(expr, args, kwargs, context):
 
 @signature('num256', 'num256')
 def num256_mod(expr, args, kwargs, context):
-    return LLLnode.from_list(['mod', args[0], args[1]], typ=BaseType('num256'), pos=getpos(expr))
+    return LLLnode.from_list(['seq',
+                                ['assert', args[1]],
+                                ['mod', args[0], args[1]]], typ=BaseType('num256'), pos=getpos(expr))
 
 
 @signature('num256', 'num256', 'num256')
 def num256_addmod(expr, args, kwargs, context):
     return LLLnode.from_list(['seq',
+                                ['assert', args[2]],
                                 ['assert', ['or', ['iszero', args[1]], ['gt', ['add', args[0], args[1]], args[0]]]],
                                 ['addmod', args[0], args[1], args[2]]], typ=BaseType('num256'), pos=getpos(expr))
 
@@ -706,6 +707,7 @@ def num256_addmod(expr, args, kwargs, context):
 @signature('num256', 'num256', 'num256')
 def num256_mulmod(expr, args, kwargs, context):
     return LLLnode.from_list(['seq',
+                                ['assert', args[2]],
                                 ['assert', ['or', ['iszero', args[0]],
                                 ['eq', ['div', ['mul', args[0], args[1]], args[0]], args[1]]]],
                                 ['mulmod', args[0], args[1], args[2]]], typ=BaseType('num256'), pos=getpos(expr))
@@ -767,7 +769,7 @@ def create_with_code_of(expr, args, kwargs, context):
                                 ['mstore', placeholder, high],
                                 ['mstore', ['add', placeholder, 27], ['mul', args[0], 2**96]],
                                 ['mstore', ['add', placeholder, 47], low],
-                                ['clamp_nonzero', ['create', value, placeholder, 64]]], typ=BaseType('address'), pos=getpos(expr))
+                                ['clamp_nonzero', ['create', value, placeholder, 64]]], typ=BaseType('address'), pos=getpos(expr), add_gas_estimate=10000)
 
 
 @signature(('num', 'decimal', 'num256'), ('num', 'decimal', 'num256'))
@@ -848,7 +850,6 @@ dispatch_table = {
 
 stmt_dispatch_table = {
     'send': send,
-    'suicide': selfdestruct,
     'selfdestruct': selfdestruct,
     'raw_call': raw_call,
     'raw_log': raw_log,

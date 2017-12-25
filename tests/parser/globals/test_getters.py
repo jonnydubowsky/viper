@@ -1,27 +1,24 @@
-import pytest
-from tests.setup_transaction_tests import chain as s, tester as t, ethereum_utils as u, check_gas, \
-    get_contract_with_gas_estimation, get_contract
-
-
-def test_state_accessor():
+def test_state_accessor(get_contract_with_gas_estimation_for_constants):
     state_accessor = """
 y: num[num]
 
+@public
 def oo():
     self.y[3] = 5
 
+@public
 def foo() -> num:
     return self.y[3]
 
     """
 
-    c = get_contract_with_gas_estimation(state_accessor)
+    c = get_contract_with_gas_estimation_for_constants(state_accessor)
     c.oo()
     assert c.foo() == 5
     print('Passed basic state accessor test')
 
 
-def test_getter_code():
+def test_getter_code(get_contract_with_gas_estimation_for_constants):
     getter_code = """
 x: public(wei_value)
 y: public(num[5])
@@ -36,6 +33,7 @@ w: public({
     g: wei_value
 }[num])
 
+@public
 def __init__():
     self.x = as_wei_value(7, wei)
     self.y[1] = 9
@@ -49,7 +47,7 @@ def __init__():
     self.w[3].g = 751
     """
 
-    c = get_contract(getter_code)
+    c = get_contract_with_gas_estimation_for_constants(getter_code)
     assert c.get_x() == 7
     assert c.get_y(1) == 9
     assert c.get_z() == b"cow"

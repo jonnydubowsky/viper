@@ -33,12 +33,32 @@ Functions are the executable units of code within a contract.
 
 ::
 
+  @public
   @payable
-  function bid(): // Function
+  def bid(): // Function
     // ...
   }
 
-:ref:`function-calls` can happen internally or externally
+:ref:`Function-calls` can happen internally or externally
 and have different levels of visibility (:ref:`visibility-and-getters`)
-towards other contracts.
+towards other contracts. Functions must be decorated with either @public or @private.
 
+.. _structure-events:
+
+Events
+======
+
+Events may be logged in specially indexed data structures that allow clients, including light clients, to efficiently search for them.
+
+::
+
+    Payment: __log__({amount: num, arg2: indexed(address)})
+
+    total_paid: num
+
+    @public
+    def pay():
+        self.total_paid += msg.value
+        log.Payment(msg.value, msg.sender)
+
+Events must be declared before global declarations and function definitions.

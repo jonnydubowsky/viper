@@ -4,6 +4,7 @@ import copy
 from .exceptions import InvalidTypeException
 from .utils import (
     base_types,
+    ceil32,
     is_varname_valid,
     valid_units,
 )
@@ -13,6 +14,8 @@ from .utils import (
 def print_unit(unit):
     if unit is None:
         return '*'
+    if not isinstance(unit, dict):
+        return unit
     pos = ''
     for k in sorted([x for x in unit.keys() if unit[x] > 0]):
         if unit[k] > 1:
@@ -95,7 +98,7 @@ class ListType(NodeType):
 # Data structure for a key-value mapping
 class MappingType(NodeType):
     def __init__(self, keytype, valuetype):
-        if not isinstance(keytype, BaseType):
+        if not isinstance(keytype, (BaseType, ByteArrayType)):
             raise Exception("Dictionary keys must be a base type")
         self.keytype = keytype
         self.valuetype = valuetype
@@ -238,7 +241,7 @@ def parse_unit(item):
 
 # Parses an expression representing a type. Annotation refers to whether
 # the type is to be located in memory or storage
-def parse_type(item, location):
+def parse_type(item, location, sigs={}):
     # Base types, eg. num
     if isinstance(item, ast.Name):
         if item.id in base_types:
@@ -247,13 +250,20 @@ def parse_type(item, location):
             return special_types[item.id]
         else:
             raise InvalidTypeException("Invalid base type: " + item.id, item)
-    # Units, eg. num (1/sec)
+    # Units, eg. num (1/sec) or contracts
     elif isinstance(item, ast.Call):
+        # Contract_types
+        if item.func.id == 'contract' or item.func.id == 'address':
+            if sigs and item.args[0].id in sigs:
+                return BaseType('address', item.args[0].id)
+            else:
+                raise InvalidTypeException('Invalid contract declaration')
         if not isinstance(item.func, ast.Name):
             raise InvalidTypeException("Malformed unit type:", item)
         base_type = item.func.id
         if base_type not in ('num', 'decimal'):
-            raise InvalidTypeException("Base type with units can only be num and decimal", item)
+            raise InvalidTypeException("You must use num, decimal, address, contract, \
+                for variable declarations and indexed for logging topics ", item)
         if len(item.args) == 0:
             raise InvalidTypeException("Malformed unit type", item)
         if isinstance(item.args[-1], ast.Name) and item.args[-1].id == "positional":
@@ -283,8 +293,8 @@ def parse_type(item, location):
             if location == 'memory':
                 raise InvalidTypeException("No mappings allowed for in-memory types, only fixed-size arrays", item)
             keytype = parse_type(item.slice.value, None)
-            if not isinstance(keytype, BaseType):
-                raise InvalidTypeException("Mapping keys must be base types", item.slice.value)
+            if not isinstance(keytype, (BaseType, ByteArrayType)):
+                raise InvalidTypeException("Mapping keys must be base or bytes types", item.slice.value)
             return MappingType(keytype, parse_type(item.value, location))
     # Dicts, used to represent mappings, eg. {uint: uint}. Key must be a base type
     elif isinstance(item, ast.Dict):
@@ -309,11 +319,6 @@ def parse_type(item, location):
         return TupleType(members)
     else:
         raise InvalidTypeException("Invalid type: %r" % ast.dump(item), item)
-
-
-# Rounds up to nearest 32, eg. 95 -> 96, 96 -> 96, 97 -> 128
-def ceil32(x):
-    return x + 31 - (x - 1) % 32
 
 
 # Gets the number of memory or storage keys needed to represent a given type

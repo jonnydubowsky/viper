@@ -1,37 +1,40 @@
-import pytest
-from tests.setup_transaction_tests import chain as s, tester as t, ethereum_utils as u, check_gas, \
-    get_contract_with_gas_estimation, get_contract
+from viper.exceptions import ConstancyViolationException
 
 
-def test_augassign_test():
+def test_augassign(get_contract_with_gas_estimation):
     augassign_test = """
+@public
 def augadd(x: num, y: num) -> num:
     z = x
     z += y
     return z
 
+@public
 def augmul(x: num, y: num) -> num:
     z = x
     z *= y
     return z
 
+@public
 def augsub(x: num, y: num) -> num:
     z = x
     z -= y
     return z
 
+@public
 def augdiv(x: num, y: num) -> num:
     z = x
     z /= y
     return z
 
+@public
 def augmod(x: num, y: num) -> num:
     z = x
     z %= y
     return z
     """
 
-    c = get_contract(augassign_test)
+    c = get_contract_with_gas_estimation(augassign_test)
 
     assert c.augadd(5, 12) == 17
     assert c.augmul(5, 12) == 60
@@ -39,3 +42,21 @@ def augmod(x: num, y: num) -> num:
     assert c.augdiv(5, 12) == 0
     assert c.augmod(5, 12) == 5
     print('Passed aug-assignment test')
+
+
+def test_invalid_assign(assert_compile_failed, get_contract_with_gas_estimation):
+    code = """
+@public
+def foo(x:num):
+    x = 5   
+"""
+    assert_compile_failed(lambda: get_contract_with_gas_estimation(code), ConstancyViolationException)
+
+
+def test_invalid_augassign(assert_compile_failed, get_contract_with_gas_estimation):
+    code = """
+@public
+def foo(x:num):
+    x += 5     
+"""
+    assert_compile_failed(lambda: get_contract_with_gas_estimation(code), ConstancyViolationException)

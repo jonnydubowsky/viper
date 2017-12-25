@@ -1,24 +1,22 @@
-import pytest
-from tests.setup_transaction_tests import chain as s, tester as t, ethereum_utils as u, check_gas, \
-    get_contract_with_gas_estimation, get_contract
-
-
-def test_arbitration_code():
+def test_arbitration_code(t, get_contract_with_gas_estimation):
     arbitration_code = """
 buyer: address
 seller: address
 arbitrator: address
 
+@public
 def setup(_seller: address, _arbitrator: address):
     if not self.buyer:
         self.buyer = msg.sender
         self.seller = _seller
         self.arbitrator = _arbitrator
 
+@public
 def finalize():
     assert msg.sender == self.buyer or msg.sender == self.arbitrator
     send(self.seller, self.balance)
 
+@public
 def refund():
     assert msg.sender == self.seller or msg.sender == self.arbitrator
     send(self.buyer, self.balance)
@@ -38,12 +36,13 @@ def refund():
     print('Passed escrow test')
 
 
-def test_arbitration_code_with_init():
+def test_arbitration_code_with_init(t, get_contract_with_gas_estimation):
     arbitration_code_with_init = """
 buyer: address
 seller: address
 arbitrator: address
 
+@public
 @payable
 def __init__(_seller: address, _arbitrator: address):
     if not self.buyer:
@@ -51,10 +50,12 @@ def __init__(_seller: address, _arbitrator: address):
         self.seller = _seller
         self.arbitrator = _arbitrator
 
+@public
 def finalize():
     assert msg.sender == self.buyer or msg.sender == self.arbitrator
     send(self.seller, self.balance)
 
+@public
 def refund():
     assert msg.sender == self.seller or msg.sender == self.arbitrator
     send(self.buyer, self.balance)

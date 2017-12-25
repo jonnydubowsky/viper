@@ -13,6 +13,9 @@ from viper.function_signature import (
 from viper.signatures.event_signature import (
     EventSignature
 )
+from viper.premade_contracts import (
+    premade_contracts
+)
 from .stmt import Stmt
 from .expr import Expr
 from .parser_utils import LLLnode
@@ -60,6 +63,7 @@ if not hasattr(ast, 'AnnAssign'):
 def parse(code):
     o = ast.parse(code)
     decorate_ast_with_source(o, code)
+    o = resolve_negative_literals(o)
     return o.body
 
 
@@ -67,6 +71,7 @@ def parse(code):
 def parse_line(code):
     o = ast.parse(code).body[0]
     decorate_ast_with_source(o, code)
+    o = resolve_negative_literals(o)
     return o
 
 
@@ -80,6 +85,19 @@ def decorate_ast_with_source(_ast, code):
             node.source_code = code
 
     MyVisitor().visit(_ast)
+
+
+def resolve_negative_literals(_ast):
+
+    class RewriteUnaryOp(ast.NodeTransformer):
+        def visit_UnaryOp(self, node):
+            if isinstance(node.op, ast.USub) and isinstance(node.operand, ast.Num):
+                node.operand.n = 0 - node.operand.n
+                return node.operand
+            else:
+                return node
+
+    return RewriteUnaryOp().visit(_ast)
 
 
 # Make a getter for a variable. This function gives an output that
@@ -140,7 +158,7 @@ def _mk_getter_helper(typ, depth=0):
 # Make a list of getters for a given variable name with a given type
 def mk_getter(varname, typ):
     funs = _mk_getter_helper(typ)
-    return ['@constant\ndef get_%s%s(%s) -> %s: return self.%s%s' % (varname, funname, head.rstrip(', '), base, varname, tail)
+    return ["""@public\n@constant\ndef get_%s%s(%s) -> %s: return self.%s%s""" % (varname, funname, head.rstrip(', '), base, varname, tail)
             for (funname, head, tail, base) in funs]
 
 
@@ -155,8 +173,10 @@ def add_contract(code):
     return _defs
 
 
-def add_globals_and_events(_defs, _events, _getters, _globals, item):
-    if isinstance(item.annotation, ast.Call) and item.annotation.func.id == "__log__":
+def add_globals_and_events(_contracts, _defs, _events, _getters, _globals, item):
+    if item.value is not None:
+        raise StructureException('May not assign value whilst defining type', item)
+    elif isinstance(item.annotation, ast.Call) and item.annotation.func.id == "__log__":
         if _globals or len(_defs):
             raise StructureException("Events must all come before global declarations and function definitions", item)
         _events.append(item)
@@ -172,10 +192,23 @@ def add_globals_and_events(_defs, _events, _getters, _globals, item):
         raise StructureException("Global variables must all come before function definitions", item)
     # If the type declaration is of the form public(<type here>), then proceed with
     # the underlying type but also add getters
+    elif isinstance(item.annotation, ast.Call) and item.annotation.func.id == "address":
+        if len(item.annotation.args) != 1:
+            raise StructureException("Address expects one arg (the type)")
+        if item.annotation.args[0].id not in premade_contracts:
+            raise VariableDeclarationException("Unsupported premade contract declaration", item.annotation.args[0])
+        premade_contract = premade_contracts[item.annotation.args[0].id]
+        _contracts[item.target.id] = add_contract(premade_contract.body)
+        _globals[item.target.id] = VariableRecord(item.target.id, len(_globals), BaseType('address'), True)
+    elif isinstance(item, ast.AnnAssign) and isinstance(item.annotation, ast.Name) and item.annotation.id in _contracts:
+        _globals[item.target.id] = VariableRecord(item.target.id, len(_globals), BaseType('address', item.annotation.id), True)
     elif isinstance(item.annotation, ast.Call) and item.annotation.func.id == "public":
         if len(item.annotation.args) != 1:
             raise StructureException("Public expects one arg (the type)")
-        typ = parse_type(item.annotation.args[0], 'storage')
+        if isinstance(item.annotation.args[0], ast.Name) and item.annotation.args[0].id in _contracts:
+            typ = BaseType('address', item.annotation.args[0].id)
+        else:
+            typ = parse_type(item.annotation.args[0], 'storage')
         _globals[item.target.id] = VariableRecord(item.target.id, len(_globals), typ, True)
         # Adding getters here
         for getter in mk_getter(item.target.id, typ):
@@ -183,7 +216,7 @@ def add_globals_and_events(_defs, _events, _getters, _globals, item):
             _getters[-1].pos = getpos(item)
     else:
         _globals[item.target.id] = VariableRecord(item.target.id, len(_globals), parse_type(item.annotation, 'storage'), True)
-    return _events, _globals, _getters
+    return _contracts, _events, _globals, _getters
 
 
 # Parse top-level functions and variables
@@ -202,7 +235,7 @@ def get_contracts_and_defs_and_globals(code):
         # Statements of the form:
         # variable_name: type
         elif isinstance(item, ast.AnnAssign):
-            _events, _globals, _getters = add_globals_and_events(_defs, _events, _getters, _globals, item)
+            _contracts, _events, _globals, _getters = add_globals_and_events(_contracts, _defs, _events, _getters, _globals, item)
         # Function definitions
         elif isinstance(item, ast.FunctionDef):
             _defs.append(item)
@@ -240,6 +273,19 @@ class Context():
         self.placeholder_count = 1
         # Original code (for error pretty-printing purposes)
         self.origcode = origcode
+        # In Loop status. Whether body is currently evaluating within a for-loop or not.
+        self.in_for_loop = set()
+        # Count returns in function
+        self.function_return_count = 0
+
+    def set_in_for_loop(self, name_of_list):
+        self.in_for_loop.add(name_of_list)
+
+    def remove_in_for_loop(self, name_of_list):
+        self.in_for_loop.remove(name_of_list)
+
+    def increment_return_counter(self):
+        self.function_return_count += 1
 
     # Add a new variable
     def new_variable(self, name, typ):
@@ -276,61 +322,75 @@ def mk_full_signature(code):
         sig = EventSignature.from_declaration(code)
         o.append(sig.to_abi_dict())
     for code in _defs:
-        sig = FunctionSignature.from_definition(code)
-        if not sig.internal:
+        sig = FunctionSignature.from_definition(code, _contracts)
+        if not sig.private:
             o.append(sig.to_abi_dict())
     return o
 
 
+def parse_events(sigs, _events):
+    for event in _events:
+        sigs[event.target.id] = EventSignature.from_declaration(event)
+    return sigs
+
+
+def parse_external_contracts(external_contracts, _contracts):
+    for _contractname in _contracts:
+        _contract_defs = _contracts[_contractname]
+        _defnames = [_def.name for _def in _contract_defs]
+        contract = {}
+        if len(set(_defnames)) < len(_contract_defs):
+            raise VariableDeclarationException("Duplicate function name: %s" % [name for name in _defnames if _defnames.count(name) > 1][0])
+        for _def in _contract_defs:
+            sig = FunctionSignature.from_definition(_def)
+            contract[sig.name] = sig
+        external_contracts[_contractname] = contract
+    return external_contracts
+
+
+def parse_other_functions(o, otherfuncs, _globals, sigs, external_contracts, origcode, runtime_only=False):
+    sub = ['seq', initializer_lll]
+    add_gas = initializer_lll.gas
+    for _def in otherfuncs:
+        sub.append(parse_func(_def, _globals, {**{'self': sigs}, **external_contracts}, origcode))
+        sub[-1].total_gas += add_gas
+        add_gas += 30
+        sig = FunctionSignature.from_definition(_def, external_contracts)
+        sig.gas = sub[-1].total_gas
+        sigs[sig.name] = sig
+    if runtime_only:
+        return sub
+    else:
+        o.append(['return', 0, ['lll', sub, 0]])
+        return o
+
+
 # Main python parse tree => LLL method
-def parse_tree_to_lll(code, origcode):
+def parse_tree_to_lll(code, origcode, runtime_only=False):
     _contracts, _events, _defs, _globals = get_contracts_and_defs_and_globals(code)
     _names = [_def.name for _def in _defs] + [_event.target.id for _event in _events]
-    # Checks for duplicate funciton / event names
+    # Checks for duplicate function / event names
     if len(set(_names)) < len(_names):
         raise VariableDeclarationException("Duplicate function or event name: %s" % [name for name in _names if _names.count(name) > 1][0])
-    contracts = {}
-    # Create the main statement
-    o = ['seq']
     # Initialization function
     initfunc = [_def for _def in _defs if is_initializer(_def)]
     # Regular functions
     otherfuncs = [_def for _def in _defs if not is_initializer(_def)]
     sigs = {}
+    external_contracts = {}
+    # Create the main statement
+    o = ['seq']
     if _events:
-        for event in _events:
-            sigs[event.target.id] = EventSignature.from_declaration(event)
-    for _contractname in _contracts:
-        _c_defs = _contracts[_contractname]
-        _defnames = [_def.name for _def in _c_defs]
-        contract = {}
-        if len(set(_defnames)) < len(_c_defs):
-            raise VariableDeclarationException("Duplicate function name: %s" % [name for name in _defnames if _defnames.count(name) > 1][0])
-        c_otherfuncs = [_def for _def in _c_defs if not is_initializer(_def)]
-        if c_otherfuncs:
-            for _def in c_otherfuncs:
-                sig = FunctionSignature.from_definition(_def)
-                contract[sig.name] = sig
-        contracts[_contractname] = contract
-    _defnames = [_def.name for _def in _defs]
-    if len(set(_defnames)) < len(_defs):
-        raise VariableDeclarationException("Duplicate function name: %s" % [name for name in _defnames if _defnames.count(name) > 1][0])
+        sigs = parse_events(sigs, _events)
+    if _contracts:
+        external_contracts = parse_external_contracts(external_contracts, _contracts)
     # If there is an init func...
     if initfunc:
         o.append(['seq', initializer_lll])
-        o.append(parse_func(initfunc[0], _globals, {**{'self': sigs}, **contracts}, origcode))
+        o.append(parse_func(initfunc[0], _globals, {**{'self': sigs}, **external_contracts}, origcode))
     # If there are regular functions...
     if otherfuncs:
-        sub = ['seq', initializer_lll]
-        add_gas = initializer_lll.gas
-        for _def in otherfuncs:
-            sub.append(parse_func(_def, _globals, {**{'self': sigs}, **contracts}, origcode))
-            sub[-1].total_gas += add_gas
-            add_gas += 30
-            sig = FunctionSignature.from_definition(_def)
-            sig.gas = sub[-1].total_gas
-            sigs[sig.name] = sig
-        o.append(['return', 0, ['lll', sub, 0]])
+        o = parse_other_functions(o, otherfuncs, _globals, sigs, external_contracts, origcode, runtime_only)
     return LLLnode.from_list(o, typ=None)
 
 
@@ -374,8 +434,7 @@ def make_clamper(datapos, mempos, typ, is_init=False):
 def parse_func(code, _globals, sigs, origcode, _vars=None):
     if _vars is None:
         _vars = {}
-
-    sig = FunctionSignature.from_definition(code)
+    sig = FunctionSignature.from_definition(code, sigs)
     # Check for duplicate variables with globals
     for arg in sig.args:
         if arg.name in _globals:
@@ -396,7 +455,7 @@ def parse_func(code, _globals, sigs, origcode, _vars=None):
     # Add asserts for payable and internal
     if not sig.payable:
         clampers.append(['assert', ['iszero', 'callvalue']])
-    if sig.internal:
+    if sig.private:
         clampers.append(['assert', ['eq', 'caller', 'address']])
     # Fill in variable positions
     for arg in sig.args:
@@ -416,6 +475,13 @@ def parse_func(code, _globals, sigs, origcode, _vars=None):
                                   ['eq', ['mload', 0], method_id_node],
                                   ['seq'] + clampers + [parse_body(c, context) for c in code.body] + ['stop']
                                ], typ=None, pos=getpos(code))
+
+    # Check for at leasts one return statement if necessary.
+    if context.return_type and context.function_return_count == 0:
+        raise StructureException(
+            "Missing return statement in function '%s' " % sig.name, code
+        )
+
     o.context = context
     o.total_gas = o.gas + calc_mem_gas(o.context.next_mem)
     o.func_name = sig.name
@@ -432,8 +498,7 @@ def parse_body(code, context):
     return LLLnode.from_list(['seq'] + o, pos=getpos(code[0]) if code else None)
 
 
-def external_contract_call_stmt(stmt, context):
-    contract_name = stmt.func.value.func.id
+def external_contract_call_stmt(stmt, context, contract_name, contract_address):
     if contract_name not in context.sigs:
         raise VariableDeclarationException("Contract not declared yet: %s" % contract_name)
     method_name = stmt.func.attr
@@ -441,18 +506,18 @@ def external_contract_call_stmt(stmt, context):
         raise VariableDeclarationException("Function not declared yet: %s (reminder: "
                                                     "function must be declared in the correct contract)" % method_name)
     sig = context.sigs[contract_name][method_name]
-    contract_address = parse_expr(stmt.func.value.args[0], context)
     inargs, inargsize = pack_arguments(sig, [parse_expr(arg, context) for arg in stmt.args], context)
-    o = LLLnode.from_list(['seq',
-                            ['assert', ['extcodesize', ['mload', contract_address]]],
-                            ['assert', ['ne', 'address', ['mload', contract_address]]],
-                            ['assert', ['call', ['gas'], ['mload', contract_address], 0, inargs, inargsize, 0, 0]]],
-                                    typ=None, location='memory', pos=getpos(stmt))
+    sub = ['seq', ['assert', ['extcodesize', contract_address]],
+                    ['assert', ['ne', 'address', contract_address]]]
+    if context.is_constant:
+        sub.append(['assert', ['staticcall', 'gas', contract_address, inargs, inargsize, 0, 0]])
+    else:
+        sub.append(['assert', ['call', 'gas', contract_address, 0, inargs, inargsize, 0, 0]])
+    o = LLLnode.from_list(sub, typ=sig.output_type, location='memory', pos=getpos(stmt))
     return o
 
 
-def external_contract_call_expr(expr, context):
-    contract_name = expr.func.value.func.id
+def external_contract_call_expr(expr, context, contract_name, contract_address):
     if contract_name not in context.sigs:
         raise VariableDeclarationException("Contract not declared yet: %s" % contract_name)
     method_name = expr.func.attr
@@ -460,7 +525,6 @@ def external_contract_call_expr(expr, context):
         raise VariableDeclarationException("Function not declared yet: %s (reminder: "
                                                     "function must be declared in the correct contract)" % method_name)
     sig = context.sigs[contract_name][method_name]
-    contract_address = parse_expr(expr.func.value.args[0], context)
     inargs, inargsize = pack_arguments(sig, [parse_expr(arg, context) for arg in expr.args], context)
     output_placeholder = context.new_placeholder(typ=sig.output_type)
     if isinstance(sig.output_type, BaseType):
@@ -469,13 +533,16 @@ def external_contract_call_expr(expr, context):
         returner = output_placeholder + 32
     else:
         raise TypeMismatchException("Invalid output type: %r" % sig.output_type, expr)
-    o = LLLnode.from_list(['seq',
-                            ['assert', ['extcodesize', ['mload', contract_address]]],
-                            ['assert', ['ne', 'address', ['mload', contract_address]]],
-                            ['assert', ['call', ['gas'], ['mload', contract_address], 0,
-                            inargs, inargsize,
-                            output_placeholder, get_size_of_type(sig.output_type) * 32]],
-                            returner], typ=sig.output_type, location='memory', pos=getpos(expr))
+    sub = ['seq', ['assert', ['extcodesize', contract_address]],
+                    ['assert', ['ne', 'address', contract_address]]]
+    if context.is_constant:
+        sub.append(['assert', ['staticcall', 'gas', contract_address, inargs, inargsize,
+                    output_placeholder, get_size_of_type(sig.output_type) * 32]])
+    else:
+        sub.append(['assert', ['call', 'gas', contract_address, 0, inargs, inargsize,
+            output_placeholder, get_size_of_type(sig.output_type) * 32]])
+    sub.extend([0, returner])
+    o = LLLnode.from_list(sub, typ=sig.output_type, location='memory', pos=getpos(expr))
     return o
 
 
@@ -595,14 +662,15 @@ def parse_stmt(stmt, context):
     return Stmt(stmt, context).lll_node
 
 
-def pack_logging_topics(event_id, args, topics_types, context):
+def pack_logging_topics(event_id, args, expected_topics, context):
     topics = [event_id]
-    for pos, typ in enumerate(topics_types):
+    for pos, expected_topic in enumerate(expected_topics):
+        typ = expected_topic.typ
         arg = args[pos]
-        input = parse_expr(arg, context)
+        value = parse_expr(arg, context)
         if isinstance(typ, ByteArrayType) and (isinstance(arg, ast.Str) or (isinstance(arg, ast.Name) and arg.id not in reserved_words)):
-            if input.typ.maxlen > typ.maxlen:
-                raise TypeMismatchException("Topic input bytes are to big: %r %r" % (input.typ, typ))
+            if value.typ.maxlen > typ.maxlen:
+                raise TypeMismatchException("Topic input bytes are to big: %r %r" % (value.typ, typ))
             if isinstance(arg, ast.Str):
                 bytez, bytez_length = string_to_bytes(arg.s)
                 if len(bytez) > 32:
@@ -610,23 +678,30 @@ def pack_logging_topics(event_id, args, topics_types, context):
                 topics.append(bytes_to_int(bytez + b'\x00' * (32 - bytez_length)))
             else:
                 size = context.vars[arg.id].size
-                topics.append(byte_array_to_num(input, arg, 'num256', size))
+                topics.append(byte_array_to_num(value, arg, 'num256', size))
         else:
-            input = unwrap_location(input)
-            input = base_type_conversion(input, input.typ, typ)
-            topics.append(input)
+            value = unwrap_location(value)
+            value = base_type_conversion(value, value.typ, typ)
+            topics.append(value)
     return topics
 
 
 def pack_args_by_32(holder, maxlen, arg, typ, context, placeholder):
     if isinstance(typ, BaseType):
-        input = parse_expr(arg, context)
-        input = base_type_conversion(input, input.typ, typ)
-        holder.append(LLLnode.from_list(['mstore', placeholder, input], typ=typ, location='memory'))
+        value = parse_expr(arg, context)
+        value = base_type_conversion(value, value.typ, typ)
+        holder.append(LLLnode.from_list(['mstore', placeholder, value], typ=typ, location='memory'))
     elif isinstance(typ, ByteArrayType):
         bytez = b''
+        # Bytes from Storage
+        if isinstance(arg, ast.Attribute) and arg.value.id == 'self':
+            stor_bytes = context.globals[arg.attr]
+            if stor_bytes.typ.maxlen > 32:
+                    raise TypeMismatchException("Can only log a maximum of 32 bytes at a time.")
+            arg2 = LLLnode.from_list(['sload', ['add', ['sha3_32', Expr(arg, context).lll_node], 1]], typ=BaseType(32))
+            holder, maxlen = pack_args_by_32(holder, maxlen, arg2, BaseType(32), context, context.new_placeholder(BaseType(32)))
         # String literals
-        if isinstance(arg, ast.Str):
+        elif isinstance(arg, ast.Str):
             if len(arg.s) > typ.maxlen:
                 raise TypeMismatchException("Data input bytes are to big: %r %r" % (len(arg.s), typ))
             for c in arg.s:
@@ -639,29 +714,56 @@ def pack_args_by_32(holder, maxlen, arg, typ, context, placeholder):
             holder.append(LLLnode.from_list(['mstore', placeholder, bytes_to_int(bytez + b'\x00' * (32 - bytez_length))], typ=typ, location='memory'))
         # Variables
         else:
-            input = parse_expr(arg, context)
-            if input.typ.maxlen > typ.maxlen:
-                raise TypeMismatchException("Data input bytes are to big: %r %r" % (input.typ, typ))
-            if arg.id in context.vars:
-                size = context.vars[arg.id].size
-                holder.append(LLLnode.from_list(['mstore', placeholder, byte_array_to_num(parse_expr(arg, context), arg, 'num256', size)], typ=typ, location='memory'))
+            value = parse_expr(arg, context)
+            if value.typ.maxlen > typ.maxlen:
+                raise TypeMismatchException("Data input bytes are to big: %r %r" % (value.typ, typ))
+            holder.append(LLLnode.from_list(['mstore', placeholder, ['mload', ['add', value, 32]]], typ=typ, location='memory'))
     elif isinstance(typ, ListType):
             maxlen += (typ.count - 1) * 32
             typ = typ.subtype
-            holder, maxlen = pack_args_by_32(holder, maxlen, arg.elts[0], typ, context, placeholder)
-            for j, arg2 in enumerate(arg.elts[1:]):
-                holder, maxlen = pack_args_by_32(holder, maxlen, arg2, typ, context, context.new_placeholder(BaseType(32)))
+
+            def check_list_type_match(provided):  # Check list types match.
+                if provided != typ:
+                    raise TypeMismatchException(
+                        "Log list type '%s' does not match provided, expected '%s'" % (provided, typ)
+                    )
+
+            # List from storage
+            if isinstance(arg, ast.Attribute) and arg.value.id == 'self':
+                stor_list = context.globals[arg.attr]
+                check_list_type_match(stor_list.typ.subtype)
+                size = stor_list.typ.count
+                for offset in range(0, size):
+                    arg2 = LLLnode.from_list(['sload', ['add', ['sha3_32', Expr(arg, context).lll_node], offset]],
+                                             typ=typ)
+                    holder, maxlen = pack_args_by_32(holder, maxlen, arg2, typ, context, context.new_placeholder(BaseType(32)))
+            # List from variable.
+            elif isinstance(arg, ast.Name):
+                size = context.vars[arg.id].size
+                pos = context.vars[arg.id].pos
+                check_list_type_match(context.vars[arg.id].typ.subtype)
+                for i in range(0, size):
+                    offset = 32 * i
+                    arg2 = LLLnode.from_list(pos + offset, typ=typ, location='memory')
+                    holder, maxlen = pack_args_by_32(holder, maxlen, arg2, typ, context, context.new_placeholder(BaseType(32)))
+            # is list literal.
+            else:
+                holder, maxlen = pack_args_by_32(holder, maxlen, arg.elts[0], typ, context, placeholder)
+                for j, arg2 in enumerate(arg.elts[1:]):
+                    holder, maxlen = pack_args_by_32(holder, maxlen, arg2, typ, context, context.new_placeholder(BaseType(32)))
+
     return holder, maxlen
 
 
 # Pack logging data arguments
-def pack_logging_data(types, args, context):
+def pack_logging_data(expected_data, args, context):
     # Checks to see if there's any data
     if not args:
         return ['seq'], 0, 0
     holder = ['seq']
     maxlen = len(args) * 32
-    for i, (arg, typ) in enumerate(zip(args, types)):
+    for i, (arg, data) in enumerate(zip(args, expected_data)):
+        typ = data.typ
         holder, maxlen = pack_args_by_32(holder, maxlen, arg, typ, context, context.new_placeholder(BaseType(32)))
     return holder, maxlen, holder[1].to_list()[1][0]
 

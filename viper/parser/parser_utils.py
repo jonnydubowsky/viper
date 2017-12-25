@@ -1,5 +1,7 @@
 import re
 
+from ethereum import opcodes
+
 from viper.exceptions import TypeMismatchException
 from viper.opcodes import comb_opcodes
 from viper.types import (
@@ -15,7 +17,8 @@ from viper.types import (
 from viper.types import (
     is_base_type,
     are_units_compatible,
-    get_size_of_type
+    get_size_of_type,
+    ceil32
 )
 from viper.utils import MemoryPositions, DECIMAL_DIVISOR
 
@@ -33,7 +36,9 @@ class NullAttractor():
 
 # Data structure for LLL parse tree
 class LLLnode():
-    def __init__(self, value, args=None, typ=None, location=None, pos=None, annotation='', mutable=True):
+    repr_show_gas = False
+
+    def __init__(self, value, args=None, typ=None, location=None, pos=None, annotation='', mutable=True, add_gas_estimate=0):
         if args is None:
             args = []
 
@@ -45,6 +50,7 @@ class LLLnode():
         self.pos = pos
         self.annotation = annotation
         self.mutable = mutable
+        self.add_gas_estimate = add_gas_estimate
         # Determine this node's valency (1 if it pushes a value on the stack,
         # 0 otherwise) and checks to make sure the number and valencies of
         # children are correct. Also, find an upper bound on gas consumption
@@ -77,9 +83,11 @@ class LLLnode():
                     self.gas += 15000
                 # Dynamic gas cost: calldatacopy
                 elif self.value.upper() in ('CALLDATACOPY', 'CODECOPY'):
-                    pass
-                    # TODO FIX GAS ESTIMATION IN ANOTHER PR
-                    # self.gas += ceil32(self.args[2].value) // 32 * 3
+                    if isinstance(self.args[2].value, int):
+                        size = self.args[2].value
+                    else:
+                        size = self.args[2].args[-1].value
+                    self.gas += ceil32(size) // 32 * 3
                 # Gas limits in call
                 if self.value.upper() == 'CALL' and isinstance(self.args[0].value, int):
                     self.gas += self.args[0].value
@@ -107,7 +115,7 @@ class LLLnode():
                 if not self.args[1].valency:
                     raise Exception("Second argument to with statement (initial value) cannot be zerovalent: %r" % self.args[1])
                 self.valency = self.args[2].valency
-                self.gas = self.args[0].gas + self.args[1].gas + 5
+                self.gas = sum([arg.gas for arg in self.args]) + 5
             # Repeat statements: repeat <index_memloc> <startval> <rounds> <body>
             elif self.value == 'repeat':
                 if len(self.args[2].args) or not isinstance(self.args[2].value, int) or self.args[2].value <= 0:
@@ -127,7 +135,7 @@ class LLLnode():
             # Seq statements: seq <statement> <statement> ...
             elif self.value == 'seq':
                 self.valency = self.args[-1].valency if self.args else 0
-                self.gas = sum([arg.gas for arg in self.args])
+                self.gas = sum([arg.gas for arg in self.args]) + 30
             # Multi statements: multi <expr> <expr> ...
             elif self.value == 'multi':
                 for arg in self.args:
@@ -150,6 +158,8 @@ class LLLnode():
             raise Exception("Invalid value for LLL AST node: %r" % self.value)
         assert isinstance(self.args, list)
 
+        self.gas += self.add_gas_estimate
+
     def to_list(self):
         return [self.value] + [a.to_list() for a in self.args]
 
@@ -165,6 +175,10 @@ class LLLnode():
         o = ''
         if self.annotation:
             o += '/* %s */ \n' % self.annotation
+        if self.repr_show_gas and self.gas:
+            OKBLUE = '\033[94m'
+            ENDC = '\033[0m'
+            o += OKBLUE + "{" + ENDC + str(self.gas) + OKBLUE + "} " + ENDC  # add gas for info.
         o += '[' + str(self.value)
         prev_lineno = self.pos[0] if self.pos else None
         arg_lineno = None
@@ -193,7 +207,7 @@ class LLLnode():
         return self.repr()
 
     @classmethod
-    def from_list(cls, obj, typ=None, location=None, pos=None, annotation=None, mutable=True):
+    def from_list(cls, obj, typ=None, location=None, pos=None, annotation=None, mutable=True, add_gas_estimate=0):
         if isinstance(typ, str):
             typ = BaseType(typ)
         if isinstance(obj, LLLnode):
@@ -203,9 +217,9 @@ class LLLnode():
                 obj.location = location
             return obj
         elif not isinstance(obj, list):
-            return cls(obj, [], typ, location, pos, annotation, mutable)
+            return cls(obj, [], typ, location, pos, annotation, mutable, add_gas_estimate)
         else:
-            return cls(obj[0], [cls.from_list(o, pos=pos) for o in obj[1:]], typ, location, pos, annotation, mutable)
+            return cls(obj[0], [cls.from_list(o, pos=pos) for o in obj[1:]], typ, location, pos, annotation, mutable, add_gas_estimate)
 
 
 # Get a decimal number as a fraction with denominator multiple of 10
@@ -238,9 +252,14 @@ def make_byte_array_copier(destination, source):
         raise TypeMismatchException("Cannot cast from greater max-length %d to shorter max-length %d" % (source.typ.maxlen, destination.typ.maxlen))
     # Special case: memory to memory
     if source.location == "memory" and destination.location == "memory":
-        return LLLnode.from_list(
-            ['with', '_sz', ['add', 32, ['mload', source]],
-                ['assert', ['call', ['add', 18, ['div', '_sz', 10]], 4, 0, source, '_sz', destination, '_sz']]], typ=None)
+        gas_calculation = opcodes.GIDENTITYBASE + \
+            opcodes.GIDENTITYWORD * (ceil32(source.typ.maxlen) // 32)
+        o = LLLnode.from_list(
+            ['with', '_source', source,
+                ['with', '_sz', ['add', 32, ['mload', '_source']],
+                    ['assert', ['call', ['add', 18, ['div', '_sz', 10]], 4, 0, '_source', '_sz', destination, '_sz']]]], typ=None, add_gas_estimate=gas_calculation)
+        return o
+
     pos_node = LLLnode.from_list('_pos', typ=source.typ, location=source.location)
     # Get the length
     if isinstance(source.typ, NullType):
@@ -378,6 +397,18 @@ def add_variable_offset(parent, key):
         if isinstance(typ, ListType):
             subtype = typ.subtype
             sub = ['uclamplt', base_type_conversion(key, key.typ, BaseType('num')), typ.count]
+        elif isinstance(typ, MappingType) and isinstance(key.typ, ByteArrayType):
+            if not isinstance(typ.keytype, ByteArrayType) or (typ.keytype.maxlen < key.typ.maxlen):
+                raise TypeMismatchException('Mapping keys of bytes cannot be cast, use exact same bytes type of: %s', str(typ.keytype))
+            subtype = typ.valuetype
+            if len(key.args[0].args) == 3:  # handle bytes literal.
+                sub = LLLnode.from_list([
+                    'seq',
+                    key,
+                    ['sha3', ['add', key.args[0].args[-1], 32], ceil32(key.typ.maxlen)]
+                ])
+            else:
+                sub = LLLnode.from_list(['sha3', ['add', key.args[0].value, 32], ceil32(key.typ.maxlen)])
         else:
             subtype = typ.valuetype
             sub = base_type_conversion(key, key.typ, typ.keytype)
@@ -408,7 +439,7 @@ def base_type_conversion(orig, frm, to, pos=None):
     if not isinstance(frm, (BaseType, NullType)) or not isinstance(to, BaseType):
         raise TypeMismatchException("Base type conversion from or to non-base type: %r %r" % (frm, to), pos)
     elif is_base_type(frm, to.typ) and are_units_compatible(frm, to):
-        return LLLnode(orig.value, orig.args, typ=to)
+        return LLLnode(orig.value, orig.args, typ=to, add_gas_estimate=orig.add_gas_estimate)
     elif is_base_type(frm, 'num') and is_base_type(to, 'decimal') and are_units_compatible(frm, to):
         return LLLnode.from_list(['mul', orig, DECIMAL_DIVISOR], typ=BaseType('decimal', to.unit, to.positional))
     elif is_base_type(frm, 'num256') and is_base_type(to, 'num') and are_units_compatible(frm, to):

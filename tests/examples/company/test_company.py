@@ -1,7 +1,6 @@
 import pytest
 
 from ethereum.tools import tester as t
-from ethereum import utils
 
 from viper import compiler
 
@@ -18,14 +17,7 @@ def tester():
             args=[tester.company_address, 1000, 10**6])
     return tester
 
-@pytest.fixture
-def assert_tx_failed(tester, function_to_test, exception = t.TransactionFailed):
-    initial_state = tester.s.snapshot()
-    with pytest.raises(exception):
-        function_to_test()
-    tester.s.revert(initial_state)
-
-def test_overbuy(tester):
+def test_overbuy(tester, assert_tx_failed):
     # If all the stock has been bought, no one can buy more
     test_shares = int(tester.c.get_total_shares() / 2)
     test_value = int(test_shares * tester.c.get_price())
@@ -34,15 +26,15 @@ def test_overbuy(tester):
     assert tester.c.stock_available() == 0
     assert tester.c.get_holding(t.a1) == (test_shares * 2)
     one_stock = tester.c.get_price()
-    assert_tx_failed(tester, lambda: tester.c.buy_stock(sender=t.k1, value=one_stock))
-    assert_tx_failed(tester, lambda: tester.c.buy_stock(sender=t.k2, value=one_stock))
+    assert_tx_failed(lambda: tester.c.buy_stock(sender=t.k1, value=one_stock))
+    assert_tx_failed(lambda: tester.c.buy_stock(sender=t.k2, value=one_stock))
 
-def test_sell_without_stock(tester):
+def test_sell_without_stock(tester, assert_tx_failed):
     # If you don't have any stock, you can't sell
-    assert_tx_failed(tester, lambda: tester.c.sell_stock(1, sender=t.k1))
-    assert_tx_failed(tester, lambda: tester.c.sell_stock(1, sender=t.k2))
+    assert_tx_failed(lambda: tester.c.sell_stock(1, sender=t.k1))
+    assert_tx_failed(lambda: tester.c.sell_stock(1, sender=t.k2))
     # Negative stock doesn't work either
-    assert_tx_failed(tester, lambda: tester.c.sell_stock(-1, sender=t.k1))
+    assert_tx_failed(lambda: tester.c.sell_stock(-1, sender=t.k1))
     # But if you do, you can!
     test_shares = int(tester.c.get_total_shares())
     test_value = int(test_shares * tester.c.get_price())
@@ -50,44 +42,44 @@ def test_sell_without_stock(tester):
     assert tester.c.get_holding(t.a1) == test_shares
     tester.c.sell_stock(test_shares, sender=t.k1)
     # But only until you run out
-    assert_tx_failed(tester, lambda: tester.c.sell_stock(1, sender=t.k1))
+    assert_tx_failed(lambda: tester.c.sell_stock(1, sender=t.k1))
 
-def test_oversell(tester):
+def test_oversell(tester, assert_tx_failed):
     # You can't sell more than you own
     test_shares = int(tester.c.get_total_shares())
     test_value = int(test_shares * tester.c.get_price())
     tester.c.buy_stock(sender=t.k1, value=test_value)
-    assert_tx_failed(tester, lambda: tester.c.sell_stock(test_shares + 1, sender=t.k1))
+    assert_tx_failed(lambda: tester.c.sell_stock(test_shares + 1, sender=t.k1))
 
-def test_transfer(tester):
+def test_transfer(tester, assert_tx_failed):
     # If you don't have any stock, you can't transfer
-    assert_tx_failed(tester, lambda: tester.c.transfer_stock(t.a2, 1, sender=t.k1))
-    assert_tx_failed(tester, lambda: tester.c.transfer_stock(t.a1, 1, sender=t.k2))
+    assert_tx_failed(lambda: tester.c.transfer_stock(t.a2, 1, sender=t.k1))
+    assert_tx_failed(lambda: tester.c.transfer_stock(t.a1, 1, sender=t.k2))
     # You can't do negative transfers to gain stock
-    assert_tx_failed(tester, lambda: tester.c.transfer_stock(t.a2, -1, sender=t.k1))
+    assert_tx_failed(lambda: tester.c.transfer_stock(t.a2, -1, sender=t.k1))
     # If you transfer, you don't have the stock anymore
     test_shares = int(tester.c.get_total_shares())
     test_value = int(test_shares * tester.c.get_price())
     tester.c.buy_stock(sender=t.k1, value=test_value)
     assert tester.c.get_holding(t.a1) == test_shares
     tester.c.transfer_stock(t.a2, test_shares, sender=t.k1)
-    assert_tx_failed(tester, lambda: tester.c.sell_stock(1, sender=t.k1))
+    assert_tx_failed(lambda: tester.c.sell_stock(1, sender=t.k1))
     # But the other person does
     tester.c.sell_stock(test_shares, sender=t.k2)
 
-def test_paybill(tester):
+def test_paybill(tester, assert_tx_failed):
     # Only the company can authorize payments
-    assert_tx_failed(tester, lambda: tester.c.pay_bill(t.a2, 1, sender=t.k1))
+    assert_tx_failed(lambda: tester.c.pay_bill(t.a2, 1, sender=t.k1))
     # A company can only pay someone if it has the money
-    assert_tx_failed(tester, lambda: tester.c.pay_bill(t.a2, 1, sender=t.k0))
+    assert_tx_failed(lambda: tester.c.pay_bill(t.a2, 1, sender=t.k0))
     # If it has the money, it can pay someone
     test_value = int(tester.c.get_total_shares() * tester.c.get_price())
     tester.c.buy_stock(sender=t.k1, value=test_value)
     tester.c.pay_bill(t.a2, test_value, sender=t.k0)
     # Until it runs out of money
-    assert_tx_failed(tester, lambda: tester.c.pay_bill(t.a3, 1, sender=t.k0))
+    assert_tx_failed(lambda: tester.c.pay_bill(t.a3, 1, sender=t.k0))
     # Then no stockholders can sell their stock either
-    assert_tx_failed(tester, lambda: tester.c.sell_stock(1, sender=t.k1))
+    assert_tx_failed(lambda: tester.c.sell_stock(1, sender=t.k1))
 
 def test_valuation(tester):
     # Valuation is number of shares held times price
@@ -95,3 +87,38 @@ def test_valuation(tester):
     test_value = int(tester.c.get_total_shares() * tester.c.get_price())
     tester.c.buy_stock(sender=t.k1, value=test_value)
     assert tester.c.debt() == test_value
+
+def test_logs(tester, get_logs):
+    # Buy is logged
+    tester.c.buy_stock(sender=t.k1, value=7 * tester.c.get_price())
+    receipt = tester.s.head_state.receipts[-1]
+    logs = get_logs(receipt, tester.c)
+    assert len(logs) == 1
+    assert logs[0]["_event_type"] == b'Buy'
+    assert logs[0]["_buy_order"] == 7
+
+    # Sell is logged
+    tester.c.sell_stock(3, sender=t.k1)
+    receipt = tester.s.head_state.receipts[-1]
+    logs = get_logs(receipt, tester.c)
+    assert len(logs) == 1
+    assert logs[0]["_event_type"] == b'Sell'
+    assert logs[0]["_sell_order"] == 3
+
+    # Transfer is logged
+    tester.c.transfer_stock(t.a2, 4, sender=t.k1)
+    receipt = tester.s.head_state.receipts[-1]
+    logs = get_logs(receipt, tester.c)
+    assert len(logs) == 1
+    assert logs[0]["_event_type"] == b'Transfer'
+    assert logs[0]["_value"] == 4
+
+    # Pay is logged
+    amount = 10**4
+    tester.c.pay_bill(t.a3, amount)
+    receipt = tester.s.head_state.receipts[-1]
+    logs = get_logs(receipt, tester.c)
+    assert len(logs) == 1
+    assert logs[0]["_event_type"] == b'Pay'
+    assert logs[0]["_amount"] == amount
+

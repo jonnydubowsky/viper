@@ -4,7 +4,7 @@ Contributing
 
 Help is always appreciated!
 
-To get started, you can try :ref:`building-from-source` in order to familiarize
+To get started, you can try `installing Viper <https://viper.readthedocs.io/en/latest/installing-viper.html>`_ in order to familiarize
 yourself with the components of Viper and the build process. Also, it may be
 useful to become well-versed at writing smart-contracts in Viper.
 
@@ -17,9 +17,16 @@ In particular, we need help in the following areas:
 * Responding to questions from other users on `StackExchange
   <https://ethereum.stackexchange.com>`_ and the `Viper Gitter
   <https://gitter.im/ethereum/viper>`_
-* Fixing and responding to `Viper's GitHub issues
-  <https://github.com/ethereum/viper/issues>`_
+* Suggesting Improvements
+* Fixing and responding to `Viper's GitHub issues <https://github.com/ethereum/viper/issues>`_
 
+
+
+How to Suggest Improvements
+===========================
+
+To suggest an improvement, please create a Viper Improvement Proposal (VIP for short)
+using the `VIP Template <https://github.com/ethereum/viper/tree/master/.github/VIP_TEMPLATE.md>`_.
 
 How to Report Issues
 ====================
@@ -42,7 +49,7 @@ very helpful and sometimes even clarifies a misunderstanding.
 Fix Bugs
 ========
 
-Go through the `GitHub issues <https://github.com/ethereum/viper/issues>`_ or report bugs at https://github.com/ethereum/viper/issues for bugs. Anything tagged with "bug" is open to whoever wants to implement it.
+Find or report bugs at our `issues page <https://github.com/ethereum/viper/issues>`_. Anything tagged with "bug" is open to whoever wants to implement it.
 
 Workflow for Pull Requests
 ==========================
@@ -57,11 +64,11 @@ and instead, ``git rebase`` your branch.
 
 **Implement Features**
 
-Additionally, if you are writing a new feature, please ensure you write appropriate
+If you are writing a new feature, please ensure you write appropriate
 Boost test cases and place them under ``tests/``.
 
-However, if you are making a larger change, please consult with the Gitter channel, first.
+If you are making a larger change, please consult first with the Gitter channel.
 
-Also, even though we do CI testing, please make sure that the tests pass for supported Python version and ensure that it builds locally before submitting a pull request.
+Although we do CI testing, please make sure that the tests pass for supported Python version and ensure that it builds locally before submitting a pull request.
 
-Thank you for your help!
+Thank you for your help! ​

@@ -1,11 +1,7 @@
 import pytest
 
-from ethereum import utils
 from ethereum.abi import ValueOutOfBounds
 from ethereum.tools import tester
-
-from tests.setup_transaction_tests import assert_tx_failed, get_log
-
 
 TOKEN_NAME = "Vipercoin"
 TOKEN_SYMBOL = "FANG"
@@ -49,14 +45,11 @@ def test_transfer(token_tester, assert_tx_failed):
     assert token_tester.c.balanceOf(token_tester.accounts[1]) == 1
     assert token_tester.c.balanceOf(token_tester.accounts[0]) == TOKEN_TOTAL_SUPPLY - 1
 
-    # Some edge cases:
-
     # more than allowed
-    assert token_tester.c.transfer(token_tester.accounts[1], TOKEN_TOTAL_SUPPLY) is False
+    assert_tx_failed(lambda: token_tester.c.transfer(token_tester.accounts[1], TOKEN_TOTAL_SUPPLY))
 
     # Negative transfer value.
     assert_tx_failed(
-        tester=token_tester,
         function_to_test=lambda: tester.c.transfer(token_tester.accounts[1], -1),
         exception=ValueOutOfBounds
     )
@@ -88,17 +81,16 @@ def test_transferFrom(token_tester, assert_tx_failed):
     assert contract.allowance(a0, a1) == ALLOWANCE - 3
 
     # a2 may not transfer.
-    assert contract.transferFrom(a0, a2, ALLOWANCE, sender=k2) is False
+    assert_tx_failed(lambda: contract.transferFrom(a0, a2, ALLOWANCE, sender=k2))
 
     # Negative transfer value.
     assert_tx_failed(
-        tester=token_tester,
         function_to_test=lambda: contract.transferFrom(a0, a2, -1, sender=k1),
         exception=ValueOutOfBounds
     )
 
     # Transfer more than allowance:
-    assert contract.transferFrom(a0, a2, 8, sender=k1) is False
+    assert_tx_failed(lambda: contract.transferFrom(a0, a2, 8, sender=k1))
     assert contract.balanceOf(a0) == TOKEN_TOTAL_SUPPLY - 3
     assert contract.balanceOf(a1) == 0
     assert contract.balanceOf(a2) == 3
@@ -113,7 +105,7 @@ def test_transferFrom(token_tester, assert_tx_failed):
     assert contract.allowance(a0, a1) == 0
 
 
-def test_transfer_event(token_tester, get_log):
+def test_transfer_event(token_tester, get_last_log):
     a0 = token_tester.accounts[0]
     a1 = token_tester.accounts[1]
     k1 = token_tester.k1
@@ -123,7 +115,7 @@ def test_transfer_event(token_tester, get_log):
 
     assert contract.transfer(a1, 1) is True
 
-    assert get_log(tester, contract, 'Transfer') == {
+    assert get_last_log(tester, contract) == {
         '_from': '0x' + a0.hex(),
         '_to': '0x' + a1.hex(),
         '_value': 1,
@@ -134,7 +126,7 @@ def test_transfer_event(token_tester, get_log):
     assert contract.approve(a1, 10) is True  # approve 10 token transfers to a1.
     assert contract.transferFrom(a0, a2, 4, sender=k1)  # transfer to a2, as a1, from a0's funds.
 
-    assert get_log(tester, contract, 'Transfer') == {
+    assert get_last_log(tester, contract) == {
         '_from': '0x' + a0.hex(),
         '_to': '0x' + a2.hex(),
         '_value': 4,
@@ -142,7 +134,7 @@ def test_transfer_event(token_tester, get_log):
     }
 
 
-def test_approval_event(token_tester, get_log):
+def test_approval_event(token_tester, get_last_log):
     a0 = token_tester.accounts[0]
     a1 = token_tester.accounts[1]
 
@@ -150,7 +142,7 @@ def test_approval_event(token_tester, get_log):
 
     assert contract.approve(a1, 10) is True  # approve 10 token transfers to a1.
 
-    assert get_log(tester, contract, 'Approval') == {
+    assert get_last_log(tester, contract) == {
         '_owner': '0x' + a0.hex(),
         '_spender': '0x' + a1.hex(),
         '_value': 10,

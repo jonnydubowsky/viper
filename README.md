@@ -31,7 +31,7 @@ Viper does NOT strive to be a 100% replacement for everything that can be done i
 **Note: Viper is still alpha software, use with care**
 
 # Installation 
-See the [Viper documentation](https://vyper.readthedocs.io/en/latest/installing-viper.html)
+See the [Viper documentation](https://vyper.readthedocs.io/en/latest/installing-vyper.html)
 for build instructions.
 
 # Compiling a contract
@@ -43,7 +43,7 @@ To compile a contract, use:
 **Note: Since .vy is not official a language supported by any syntax highlights or linter,
 it is recommended to name your viper file into `.v.py` to have a python highlights.**
 
-There is also an [online compiler](https://viper.tools/) available you can use to experiment with
+There is also an [online compiler](https://vyper.readthedocs.io/en/latest/) available you can use to experiment with
 the language and compile to ``bytecode`` and/or ``LLL``.
 
 **Note: While the viper version of the online compiler is updated on a regular basis it might
